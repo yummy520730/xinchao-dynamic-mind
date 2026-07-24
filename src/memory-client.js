@@ -5,6 +5,35 @@ export class MemoryClient {
     this.initializePromise = null;
   }
 
+  async bridgePost(path, payload) {
+    if (!this.config.bridgeUrl) {
+      throw new Error('MEMORY_BRIDGE_URL is required for lmc5_bridge transport');
+    }
+    if (!this.config.bridgeToken) {
+      throw new Error('MEMORY_BRIDGE_TOKEN is required for lmc5_bridge transport');
+    }
+    const response = await fetch(`${this.config.bridgeUrl}${path}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Authorization: `Bearer ${this.config.bridgeToken}`,
+        'X-Memory-Caller': 'xinchao-dynamic-mind',
+      },
+      body: JSON.stringify(payload),
+      redirect: 'manual',
+      signal: AbortSignal.timeout(15000),
+    });
+    const raw = await response.text();
+    let data = {};
+    try { data = raw ? JSON.parse(raw) : {}; }
+    catch { throw new Error(`LMC-5 bridge returned invalid JSON: HTTP ${response.status}`); }
+    if (!response.ok) {
+      throw new Error(`LMC-5 bridge failed: HTTP ${response.status} ${String(data.error ?? '').slice(0, 160)}`);
+    }
+    return data;
+  }
+
   async post(payload, expectBody = true) {
     const headers = {
       'Content-Type': 'application/json',
@@ -61,6 +90,14 @@ export class MemoryClient {
   }
 
   async recentMaterial() {
+    if (this.config.transport === 'lmc5_bridge') {
+      const result = await this.bridgePost('/bridge/xinchao/recall', {
+        query: '近期重要记忆、情绪、关系变化和未完成事项',
+        max_results: this.config.breathMaxResults,
+        max_tokens: this.config.breathMaxTokens,
+      });
+      return String(result.context ?? '').slice(0, 10000);
+    }
     const result = await this.call(this.config.readTool, {
       query: '近期重要记忆、情绪、关系变化和未完成事项',
       max_results: this.config.breathMaxResults,
@@ -70,6 +107,14 @@ export class MemoryClient {
   }
 
   async daytimeMaterial() {
+    if (this.config.transport === 'lmc5_bridge') {
+      const result = await this.bridgePost('/bridge/xinchao/recall', {
+        query: '白天自然浮现的近期记忆、具体细节、未说完的话和当下牵挂；不要返回系统配置或技术信息',
+        max_results: this.config.breathMaxResults,
+        max_tokens: this.config.breathMaxTokens,
+      });
+      return String(result.context ?? '').slice(0, 10000);
+    }
     const result = await this.call(this.config.readTool, {
       query: '白天自然浮现的近期记忆、具体细节、未说完的话和当下牵挂；不要返回系统配置或技术信息',
       max_results: this.config.breathMaxResults,
@@ -86,6 +131,19 @@ export class MemoryClient {
       `醒后意识：${dream.awareness}`,
       '说明：这是睡眠结算产生的模拟梦境，不是现实事件；读取外部记忆不代表意识状态发生变化。'
     ].join('\n');
+    if (this.config.transport === 'lmc5_bridge') {
+      const result = await this.bridgePost('/bridge/xinchao/candidates', {
+        external_id: dream.id,
+        title: `心潮梦境 · ${String(dream.createdAt ?? '').slice(0, 16).replace('T', ' ')}`,
+        content,
+        category: 'episode',
+        thread: 'reflection',
+        importance: 6.5,
+        privacy_scope: 'personal',
+        relation_terms: ['心潮', '梦境', dream.source ?? 'rules'],
+      });
+      return String(result.candidate_id ?? '');
+    }
     const result = await this.call(this.config.writeTool, { content, kind: 'dream', pin: false });
     const text = extractText(result);
     return text.match(/[a-f0-9]{12,}/i)?.[0] ?? null;

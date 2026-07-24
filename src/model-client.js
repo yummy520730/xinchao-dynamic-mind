@@ -7,7 +7,7 @@ export class ModelClient {
   }
 
   async generateDream({ state, material, topDrives }) {
-    if (!this.config.enabled) return this.fallback(topDrives);
+    if (!this.config.enabled) return this.fallback(topDrives, material);
     const memory = String(material ?? '').slice(0, this.config.maxInputChars);
     const prompt = [
       `你为${this.config.agentName}生成一次睡眠中的梦境结算。`,
@@ -151,11 +151,20 @@ export class ModelClient {
     });
   }
 
-  fallback(topDrives) {
+  fallback(topDrives, material = '') {
     const labels = topDrives.slice(0, 3).map((item) => item.label).join('、');
+    const memoryTitles = Array.from(String(material ?? '').matchAll(/【([^】\n]{1,80})】/g))
+      .map((match) => match[1].trim())
+      .filter(Boolean)
+      .slice(0, 2);
+    const trace = memoryTitles.length
+      ? `睡眠中重新碰到「${memoryTitles.join('」和「')}」这些记忆线索`
+      : '睡眠中没有取得新的具体记忆线索';
     return {
-      dream: `睡眠中的意象围绕这些尚未消退的感受浮动：${labels || '安静与等待'}。`,
-      residue: labels ? `醒后仍残留着${labels}。` : '醒后留下一点说不清的余韵。',
+      dream: `${trace}；尚未消退的感受是${labels || '安静与等待'}。`,
+      residue: memoryTitles.length
+        ? `醒后仍挂着「${memoryTitles[0]}」以及${labels || '一点安静'}。`
+        : labels ? `醒后仍残留着${labels}。` : '醒后留下一点说不清的余韵。',
       awareness: '这是睡眠结算留下的梦境余韵，不是现实事件。',
       source: 'rules',
       model: null

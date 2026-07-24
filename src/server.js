@@ -231,7 +231,23 @@ const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, 'http://localhost');
     if (request.method === 'GET' && url.pathname === '/health') {
-      return send(response, 200, { ok: true, mode: config.shadowMode ? 'shadow' : 'active', version: '2.0.0' });
+      return send(response, 200, {
+        ok: true,
+        mode: config.shadowMode ? 'shadow' : 'active',
+        version: '2.0.0-lmc.1',
+        port: config.port,
+        stateWritable: true,
+        memory: {
+          transport: config.memory.transport,
+          readEnabled: config.memory.readEnabled,
+          writeEnabled: config.memory.writeEnabled,
+          configured: config.memory.transport === 'lmc5_bridge'
+            ? Boolean(config.memory.bridgeUrl && config.memory.bridgeToken)
+            : Boolean(config.memory.url),
+        },
+        modelEnabled: config.model.enabled,
+        barkEnabled: config.bark.enabled,
+      });
     }
     if (!authorized(request)) return send(response, 401, { error: 'unauthorized' });
 
@@ -272,14 +288,43 @@ const server = createServer(async (request, response) => {
   }
 });
 
-server.listen(config.port, '0.0.0.0', async () => {
+async function start() {
+  // Force the first state write before declaring the service ready. A mounted
+  // volume with wrong ownership now fails immediately instead of staying on an
+  // in-memory-looking initial state until the first scheduled cycle.
   await store.read();
-  log('service_started', { port: config.port, shadow: config.shadowMode, modelEnabled: config.model.enabled, barkEnabled: config.bark.enabled });
-});
+  await new Promise((resolve, reject) => {
+    const onError = (error) => reject(error);
+    server.once('error', onError);
+    server.listen(config.port, '0.0.0.0', () => {
+      server.off('error', onError);
+      resolve();
+    });
+  });
+  log('service_started', {
+    port: config.port,
+    statePath: config.statePath,
+    stateWritable: true,
+    shadow: config.shadowMode,
+    modelEnabled: config.model.enabled,
+    barkEnabled: config.bark.enabled,
+  });
 
-const timer = setInterval(() => runCycle().catch((error) => log('cycle_failed', { message: error.message })), config.settleIntervalMinutes * 60_000);
-timer.unref();
+  const timer = setInterval(
+    () => runCycle().catch((error) => log('cycle_failed', { message: error.message })),
+    config.settleIntervalMinutes * 60_000,
+  );
+  timer.unref();
 
-for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => server.close(() => process.exit(0)));
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.on(signal, () => {
+      clearInterval(timer);
+      server.close(() => process.exit(0));
+    });
+  }
 }
+
+start().catch((error) => {
+  log('startup_failed', { message: error.message, statePath: config.statePath, port: config.port });
+  process.exit(1);
+});

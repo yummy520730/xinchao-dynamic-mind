@@ -35,8 +35,11 @@ export function loadConfig() {
     dreamMinIntervalHours: number('DREAM_MIN_INTERVAL_HOURS', 6, 1, 168),
     dreamMaxPerDay: number('DREAM_MAX_PER_DAY', 4, 1, 12),
     memory: {
+      transport: process.env.MEMORY_TRANSPORT ?? 'mcp',
       url: process.env.MEMORY_MCP_URL ?? '',
       token: process.env.MEMORY_MCP_TOKEN ?? '',
+      bridgeUrl: (process.env.MEMORY_BRIDGE_URL ?? '').replace(/\/$/, ''),
+      bridgeToken: process.env.MEMORY_BRIDGE_TOKEN ?? '',
       readEnabled: bool('MEMORY_READ_ENABLED', false),
       writeEnabled: bool('MEMORY_WRITE_ENABLED', false),
       readTool: process.env.MEMORY_READ_TOOL ?? 'breath',
