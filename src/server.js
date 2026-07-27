@@ -234,7 +234,7 @@ const server = createServer(async (request, response) => {
       return send(response, 200, {
         ok: true,
         mode: config.shadowMode ? 'shadow' : 'active',
-        version: '2.0.0-lmc.1',
+        version: '2.0.0-lmc.2',
         port: config.port,
         stateWritable: true,
         memory: {

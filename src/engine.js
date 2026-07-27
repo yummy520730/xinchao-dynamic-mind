@@ -7,11 +7,13 @@ const iso = (value) => new Date(value).toISOString();
 export function newState(now = new Date()) {
   const at = iso(now);
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     revision: 0,
     consciousness: 'awake',
     lastConversationAt: at,
     lastHeartbeatAt: null,
+    lastInteractionAt: null,
+    lastSatisfiedDrives: [],
     lastSettledAt: at,
     sleepStartedAt: null,
     drives: Object.fromEntries(DRIVE_KEYS.map((key) => [key, 0.15])),
@@ -137,15 +139,24 @@ export function settleState(input, now = new Date(), sleepAfterMinutes = 90, opt
       continue;
     }
 
+    const ceiling = clamp(Number(dim.ceiling ?? SATURATE_CEIL), 0.1, 1);
+    const floor = Math.min(ceiling, clamp(Number(dim.saturationFloor ?? SATURATE_FLOOR)));
+
     let next;
-    if (current >= SATURATE_CEIL) {
-      const decay = (current - SATURATE_FLOOR) * 0.10 * elapsedHours;
-      next = clamp(Math.max(SATURATE_FLOOR, current - decay));
+    if (current > ceiling) {
+      // Bring legacy states that were flattened at 0.80 into their
+      // dimension-specific range without an abrupt reset.
+      next = Math.max(ceiling, current - 0.12 * elapsedHours);
     } else {
       let rate = dim.growPerHour;
       if (isNight && dim.nightMul !== undefined) rate *= dim.nightMul;
       rate *= fatigueMultiplier;
-      next = Math.min(clamp(current + rate * elapsedHours), SATURATE_CEIL);
+      const headroom = Math.max(0, 1 - current / ceiling);
+      const growth = rate * headroom * elapsedHours;
+      const sleepDecay = state.consciousness === 'sleeping'
+        ? Number(dim.sleepDecayPerHour ?? 0.008) * Math.max(0, current - floor) * elapsedHours
+        : 0;
+      next = clamp(current + growth - sleepDecay, 0, ceiling);
     }
 
     if (next !== current) changed = true;
@@ -215,8 +226,11 @@ export function applyConversationEvent(input, event = {}, now = new Date()) {
     }
   }
 
+  const satisfiedDrives = [...new Set(event.satisfiedDrives ?? [])]
+    .filter((key) => DRIVE_KEYS.includes(key));
+
   // Multiplicative satisfy
-  for (const key of event.satisfiedDrives ?? []) {
+  for (const key of satisfiedDrives) {
     if (!DRIVE_KEYS.includes(key)) continue;
     const dim = DIMENSIONS[key];
     state.drives[key] = Number(clamp(Number(state.drives[key]) * (dim.satisfyMul ?? 0.40)).toFixed(4));
@@ -237,6 +251,9 @@ export function applyConversationEvent(input, event = {}, now = new Date()) {
     }
   }
 
+  state.lastInteractionAt = iso(now);
+  state.lastSatisfiedDrives = satisfiedDrives;
+  state.schemaVersion = Math.max(5, Number(state.schemaVersion) || 0);
   state.revision += 1;
   return { state, changed: true, wasSleeping };
 }
