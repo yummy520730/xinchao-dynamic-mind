@@ -9,6 +9,7 @@
 ## 2.0 的核心能力
 
 - **十二维驱动力**：亲密、牵挂、分享、好奇、责任、反思等状态随时间增长或被事件满足。
+- **防黏顶平衡**：各驱动力使用不同软上限；LMC 的真实聊天会自动发送有界满足信号。
 - **念头池**：短暂念头会衰减，反复出现的主题会形成执念加权，并影响意图选择。
 - **疲惫与睡眠**：长时间运行会积累疲惫，空闲后进入睡眠并结算梦境余韵。
 - **清晨静默**：可配置凌晨冻结窗口，避免所有驱动力机械增长。
@@ -103,6 +104,36 @@ MEMORY_WRITE_TOOL=hold
 ```
 
 读取工具应接受 `query`、`max_results`、`max_tokens`；写入工具应接受 `content`、`kind`、`pin`。如果你的 MCP 参数不同，可修改 `src/memory-client.js` 适配。
+
+### LMC-5 Claude Web 安全桥接
+
+本分支保留原有 MCP 客户端，同时增加 `lmc5_bridge` 模式，用于 LMC-5
+保持 Claude OAuth 时的服务器间通信：
+
+```dotenv
+SHADOW_MODE=false
+MEMORY_TRANSPORT=lmc5_bridge
+MEMORY_BRIDGE_URL=https://your-lmc5-domain.example
+MEMORY_BRIDGE_TOKEN=与-LMC5_XINCHAO_BRIDGE_TOKEN-相同
+MEMORY_READ_ENABLED=true
+MEMORY_WRITE_ENABLED=true
+MODEL_ENABLED=false
+BARK_ENABLED=false
+DAYTIME_EMERGENCE_ENABLED=false
+```
+
+读取不会被 LMC 记录成对方发言，也不会读取敏感记忆。写入只创建待审核候选，
+不会直接进入精选记忆。心潮自己的 `SERVICE_TOKEN` 则提供给 LMC 的
+`LMC5_XINCHAO_TOKEN`，两个 Token 的职责不要混用。
+
+### Zeabur 部署注意
+
+- 把持久卷挂到 `/app/state`。容器入口会先把目录交给 `node` 用户并试写
+  `state.json`；不可写时会立即记录 `startup_failed` 并退出。
+- 不要在 Zeabur 手填 `PORT`。本地默认端口是 `18110`，线上应使用平台注入值；
+  `/health` 和启动日志都会返回实际监听端口。
+- `/memory-data/heartbeat.json` 是可选只读输入，不挂卷会安全回退。
+  `BARK_ENABLED=false` 时缺少它不影响后台状态结算。
 
 ## 上线顺序
 
