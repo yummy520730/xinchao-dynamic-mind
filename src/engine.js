@@ -413,6 +413,11 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
   }
   const wasSleeping = state.consciousness === 'sleeping';
   state.consciousness = 'awake';
+  // A genuine, non-duplicate conversation event is the authoritative last
+  // contact signal. This keeps idle notifications working even when the
+  // optional shared heartbeat file is not mounted. Duplicate retries return
+  // above, so they cannot keep extending the idle window.
+  state.lastHeartbeatAt = iso(now);
   state.lastConversationAt = iso(now);
   state.lastSettledAt = iso(now);
   state.sleepStartedAt = null;

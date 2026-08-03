@@ -72,7 +72,7 @@ export class OmbreClient {
           params: {
             protocolVersion: '2025-06-18',
             capabilities: {},
-            clientInfo: { name: 'xinchao-dynamic-mind', version: '2.3.2-lmc.1' },
+            clientInfo: { name: 'xinchao-dynamic-mind', version: '2.3.2-lmc.2' },
           },
         });
         if (!this.sessionId) throw new Error('Ombre MCP did not return a session id');

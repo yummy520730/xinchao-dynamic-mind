@@ -34,6 +34,7 @@ test('only an explicit conversation event wakes the state', () => {
   assert.equal(settled.consciousness, 'sleeping');
   const awake = applyConversationEvent(settled, {}, new Date('2026-07-16T03:01:00Z')).state;
   assert.equal(awake.consciousness, 'awake');
+  assert.equal(awake.lastHeartbeatAt, '2026-07-16T03:01:00.000Z');
   assert.match(awake.pendingAwareness.note, /调用记忆服务本身不代表醒来/);
 });
 
@@ -113,6 +114,22 @@ test('dream residue and autonomous contact use separate heartbeat idle gates', (
   assert.equal(contactIdleAllowed(state, new Date('2026-07-18T00:00:00Z'), 24), false);
 });
 
+test('a real conversation starts the idle clock while duplicate retries do not extend it', () => {
+  const start = new Date('2026-07-16T00:00:00Z');
+  const event = {
+    eventId: 'opaque-contact-event',
+    interactionType: 'companionship',
+  };
+  const first = applyConversationEvent(newState(start), event, start).state;
+  assert.equal(first.lastHeartbeatAt, '2026-07-16T00:00:00.000Z');
+  assert.equal(contactIdleAllowed(first, new Date('2026-07-16T01:59:59Z'), 2), false);
+  assert.equal(contactIdleAllowed(first, new Date('2026-07-16T02:00:00Z'), 2), true);
+
+  const retried = applyConversationEvent(first, event, new Date('2026-07-16T01:30:00Z'));
+  assert.equal(retried.duplicate, true);
+  assert.equal(retried.state.lastHeartbeatAt, '2026-07-16T00:00:00.000Z');
+});
+
 test('daytime emergence has its own randomized schedule and local daytime window', () => {
   const options = { timeZone: 'Asia/Shanghai', startHour: 8, endHour: 23, maxPerDay: 7 };
   const start = new Date('2026-07-16T00:00:00Z'); // 08:00 in Shanghai
@@ -188,6 +205,7 @@ test('conversation event ids make interaction settlement idempotent', () => {
   assert.equal(second.duplicate, true);
   assert.equal(second.interaction.reasonCode, 'duplicate_event');
   assert.equal(second.state.revision, first.state.revision);
+  assert.equal(second.state.lastHeartbeatAt, first.state.lastHeartbeatAt);
   assert.deepEqual(second.state.drives, first.state.drives);
   assert.equal(second.state.interactionUsage['2026-07-28'], 1);
   assert.equal(second.state.recentConversationEvents.length, 1);

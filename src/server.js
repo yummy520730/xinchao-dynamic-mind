@@ -570,7 +570,7 @@ const server = createServer(async (request, response) => {
         ok: true,
         system: 'xinchao-dynamic-mind',
         mode: config.shadowMode ? 'shadow' : 'active',
-        version: '2.3.2-lmc.1',
+        version: '2.3.2-lmc.2',
         port: config.port,
         stateWritable: true,
         memory: {
