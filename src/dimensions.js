@@ -1,5 +1,5 @@
-// Global fallbacks. Each growing drive has its own soft ceiling so unrelated
-// needs do not flatten into the same integer percentage after a long idle.
+// Global fallbacks. Growing drives use separate soft ceilings so long idle
+// periods do not flatten unrelated needs into the same visible percentage.
 export const SATURATE_CEIL  = 0.90;
 export const SATURATE_FLOOR = 0.58;
 

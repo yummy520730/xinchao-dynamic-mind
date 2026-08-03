@@ -1,19 +1,201 @@
+import { createHash } from 'node:crypto';
 import { DIMENSIONS, DRIVE_KEYS, SATURATE_CEIL, SATURATE_FLOOR } from './dimensions.js';
-import { newThoughtPool, tickThoughtPool, addFlashThought, obsessionBonus } from './thought-pool.js';
+import { newThoughtPool, tickThoughtPool, obsessionBonus } from './thought-pool.js';
 
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
 const iso = (value) => new Date(value).toISOString();
+const SESSION_TONES = new Set(['neutral', 'calm', 'warm', 'guarded', 'conflicted', 'focused', 'playful', 'tired']);
+const SESSION_FIELDS = ['warmth', 'tension', 'attention', 'confidence'];
+const MAX_RECENT_CONVERSATION_EVENTS = 256;
+const MAX_RECENT_DREAMS = 20;
+
+export const INTERACTION_TYPES = Object.freeze([
+  'companionship',
+  'affection',
+  'intimacy',
+  'sharing',
+  'discovery',
+  'task_progress',
+  'reflection',
+  'conflict',
+  'loss',
+  'reconciliation',
+]);
+
+const INTERACTION_EFFECTS = Object.freeze({
+  companionship: { relief: { monitor: 0.06, social: 0.05 } },
+  affection: { relief: { possess: 0.08, crave: 0.08, monitor: 0.05 } },
+  intimacy: { relief: { possess: 0.12, crave: 0.15, libido: 0.18 } },
+  sharing: { relief: { share: 0.14, social: 0.04 } },
+  discovery: { relief: { curiosity: 0.15, boredom: 0.12 } },
+  task_progress: { relief: { duty: 0.15 } },
+  reflection: { relief: { reflection: 0.15 } },
+  conflict: { increase: { anger: 0.07, grieve: 0.02 } },
+  loss: { increase: { grieve: 0.08, monitor: 0.04 } },
+  reconciliation: { relief: { anger: 0.30, grieve: 0.18, monitor: 0.04 } },
+});
+
+function ensureStateShape(state) {
+  state.sessionOverlays ??= {};
+  state.contextDeliveries ??= {};
+  state.recentConversationEvents = Array.isArray(state.recentConversationEvents)
+    ? state.recentConversationEvents.slice(-MAX_RECENT_CONVERSATION_EVENTS)
+    : [];
+  state.interactionUsage ??= {};
+  state.handoffNotes = Array.isArray(state.handoffNotes) ? state.handoffNotes : [];
+  state.lastDreamAttemptAt ??= null;
+  state.lastDreamMaterialFingerprint ??= null;
+  state.schemaVersion = Math.max(8, Number(state.schemaVersion) || 0);
+  return state;
+}
+
+function pruneExpiredSessionOverlays(state, now) {
+  let removed = 0;
+  const nowMs = now.getTime();
+  for (const [sessionId, overlay] of Object.entries(state.sessionOverlays ?? {})) {
+    const expiresAt = Date.parse(overlay?.expiresAt ?? '');
+    if (Number.isFinite(expiresAt) && expiresAt <= nowMs) {
+      delete state.sessionOverlays[sessionId];
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+function cleanSessionId(event) {
+  return String(event?.sessionId ?? event?.session_id ?? '').replace(/\s+/g, ' ').trim().slice(0, 120);
+}
+
+function cleanEventId(event) {
+  return String(event?.eventId ?? event?.event_id ?? '').replace(/\s+/g, ' ').trim().slice(0, 120);
+}
+
+function eventFingerprint(eventId) {
+  return eventId
+    ? createHash('sha256').update(eventId, 'utf8').digest('hex').slice(0, 24)
+    : '';
+}
+
+function interactionType(event) {
+  const value = String(event?.interactionType ?? event?.interaction_type ?? '').trim().toLowerCase();
+  return INTERACTION_TYPES.includes(value) ? value : '';
+}
+
+function interactionAlreadyProcessed(state, eventId) {
+  const fingerprint = eventFingerprint(eventId);
+  return Boolean(
+    fingerprint
+    && state.recentConversationEvents.some((item) => item?.eventFingerprint === fingerprint),
+  );
+}
+
+function recordConversationEventFingerprint(state, eventId, type, now) {
+  const fingerprint = eventFingerprint(eventId);
+  if (!fingerprint) return;
+  state.recentConversationEvents = [
+    ...state.recentConversationEvents,
+    {
+      eventFingerprint: fingerprint,
+      interactionType: type || null,
+      processedAt: iso(now),
+    },
+  ].slice(-MAX_RECENT_CONVERSATION_EVENTS);
+}
+
+function applyInteractionOutcome(state, type, now, options = {}) {
+  if (!type) {
+    return {
+      type: null,
+      applied: false,
+      reasonCode: 'no_interaction_outcome',
+      affectedDrives: [],
+    };
+  }
+  const maxPerDay = clamp(Number(options.maxInteractionEffectsPerDay ?? 24), 1, 96);
+  const timeZone = options.timeZone ?? 'Asia/Shanghai';
+  const { day } = localDayAndHour(now, timeZone);
+  const used = Number(state.interactionUsage[day] ?? 0);
+  if (used >= maxPerDay) {
+    return {
+      type,
+      applied: false,
+      reasonCode: 'daily_effect_limit',
+      affectedDrives: [],
+    };
+  }
+
+  const effect = INTERACTION_EFFECTS[type];
+  const affected = new Set();
+  for (const [key, relief] of Object.entries(effect.relief ?? {})) {
+    if (!DRIVE_KEYS.includes(key)) continue;
+    const current = Number(state.drives[key] ?? 0);
+    state.drives[key] = Number(clamp(current * (1 - clamp(Number(relief), 0, 0.35))).toFixed(4));
+    affected.add(key);
+  }
+  for (const [key, increase] of Object.entries(effect.increase ?? {})) {
+    if (!DRIVE_KEYS.includes(key)) continue;
+    const current = Number(state.drives[key] ?? 0);
+    state.drives[key] = Number(clamp(current + clamp(Number(increase), 0, 0.12)).toFixed(4));
+    affected.add(key);
+  }
+  state.interactionUsage[day] = used + 1;
+  state.interactionUsage = Object.fromEntries(
+    Object.entries(state.interactionUsage).sort(([left], [right]) => right.localeCompare(left)).slice(0, 14),
+  );
+  return {
+    type,
+    applied: true,
+    reasonCode: 'applied',
+    affectedDrives: [...affected],
+  };
+}
+
+function applySessionOverlay(state, event, now) {
+  const sessionId = cleanSessionId(event);
+  if (!sessionId) return { sessionId: '', created: false };
+  const current = state.sessionOverlays[sessionId] ?? {
+    sessionId,
+    createdAt: iso(now),
+    tone: 'neutral',
+    warmth: 0.5,
+    tension: 0,
+    attention: 0.5,
+    confidence: 0.5,
+  };
+  const absolute = event.sessionState ?? event.windowState ?? {};
+  const deltas = event.sessionDeltas ?? event.windowDeltas ?? {};
+  for (const key of SESSION_FIELDS) {
+    const base = Number(current[key] ?? (key === 'tension' ? 0 : 0.5));
+    const hasAbsolute = Number.isFinite(Number(absolute[key]));
+    const delta = Number.isFinite(Number(deltas[key])) ? Number(deltas[key]) : 0;
+    current[key] = Number(clamp((hasAbsolute ? Number(absolute[key]) : base) + delta).toFixed(4));
+  }
+  const tone = String(absolute.tone ?? event.sessionTone ?? current.tone ?? 'neutral').trim().toLowerCase();
+  current.tone = SESSION_TONES.has(tone)
+    ? tone
+    : (SESSION_TONES.has(current.tone) ? current.tone : 'neutral');
+  const ttlMinutes = clamp(Number(event.sessionTtlMinutes ?? event.session_ttl_minutes ?? 240), 15, 1440);
+  current.lastConversationAt = iso(now);
+  current.updatedAt = iso(now);
+  current.expiresAt = iso(new Date(now.getTime() + ttlMinutes * 60_000));
+  current.lastEventId = String(event.eventId ?? event.event_id ?? '').trim().slice(0, 120);
+  const created = !state.sessionOverlays[sessionId];
+  state.sessionOverlays[sessionId] = current;
+  const entries = Object.entries(state.sessionOverlays)
+    .sort((left, right) => Date.parse(right[1]?.updatedAt ?? '') - Date.parse(left[1]?.updatedAt ?? ''))
+    .slice(0, 64);
+  state.sessionOverlays = Object.fromEntries(entries);
+  return { sessionId, created };
+}
 
 export function newState(now = new Date()) {
   const at = iso(now);
   return {
-    schemaVersion: 5,
+    schemaVersion: 8,
     revision: 0,
     consciousness: 'awake',
     lastConversationAt: at,
     lastHeartbeatAt: null,
-    lastInteractionAt: null,
-    lastSatisfiedDrives: [],
     lastSettledAt: at,
     sleepStartedAt: null,
     drives: Object.fromEntries(DRIVE_KEYS.map((key) => [key, 0.15])),
@@ -21,6 +203,8 @@ export function newState(now = new Date()) {
     fatigue: 0,
     recentDreams: [],
     dreamUsage: {},
+    lastDreamAttemptAt: null,
+    lastDreamMaterialFingerprint: null,
     lastBarkAt: null,
     lastDreamBarkAt: null,
     lastAutonomousBarkAt: null,
@@ -32,6 +216,10 @@ export function newState(now = new Date()) {
     nextDaytimeEmergenceAt: null,
     daytimeEmergenceUsage: {},
     pendingAwareness: null,
+    sessionOverlays: {},
+    contextDeliveries: {},
+    recentConversationEvents: [],
+    interactionUsage: {},
   };
 }
 
@@ -97,7 +285,7 @@ function appendRecentBark(state, at, kind, message) {
     ...recentBarkHistory(state),
     { at, kind, message },
   ].slice(-8);
-  state.schemaVersion = Math.max(4, Number(state.schemaVersion) || 0);
+  state.schemaVersion = Math.max(6, Number(state.schemaVersion) || 0);
 }
 
 // ── Time helpers ──────────────────────────────────────────────────
@@ -114,10 +302,12 @@ export function localDayAndHour(now, timeZone) {
 // ── Settle (the heartbeat tick) ───────────────────────────────────
 
 export function settleState(input, now = new Date(), sleepAfterMinutes = 90, options = {}) {
-  const state = structuredClone(input);
+  const originalSchemaVersion = Number(input?.schemaVersion) || 0;
+  const state = ensureStateShape(structuredClone(input));
   const nowMs = now.getTime();
   const elapsedHours = Math.max(0, (nowMs - Date.parse(state.lastSettledAt)) / 3_600_000);
-  let changed = elapsedHours > 0;
+  let changed = elapsedHours > 0 || originalSchemaVersion < state.schemaVersion;
+  if (pruneExpiredSessionOverlays(state, now) > 0) changed = true;
 
   const timeZone = options.timeZone ?? 'Asia/Shanghai';
   const { hour } = localDayAndHour(now, timeZone);
@@ -144,8 +334,8 @@ export function settleState(input, now = new Date(), sleepAfterMinutes = 90, opt
 
     let next;
     if (current > ceiling) {
-      // Bring legacy states that were flattened at 0.80 into their
-      // dimension-specific range without an abrupt reset.
+      // Migrate legacy states that had flattened at 0.80 without an abrupt
+      // reset. Each tick moves them toward the dimension-specific range.
       next = Math.max(ceiling, current - 0.12 * elapsedHours);
     } else {
       let rate = dim.growPerHour;
@@ -169,7 +359,8 @@ export function settleState(input, now = new Date(), sleepAfterMinutes = 90, opt
   for (const [key, amount] of Object.entries(feedbacks)) {
     if (DRIVE_KEYS.includes(key)) {
       const before = Number(state.drives[key]);
-      state.drives[key] = Number(clamp(before + amount).toFixed(4));
+      const ceiling = clamp(Number(DIMENSIONS[key].ceiling ?? SATURATE_CEIL), 0.1, 1);
+      state.drives[key] = Number(clamp(before + amount, 0, ceiling).toFixed(4));
       if (state.drives[key] !== before) changed = true;
     }
   }
@@ -199,14 +390,34 @@ export function settleState(input, now = new Date(), sleepAfterMinutes = 90, opt
 
 // ── Conversation event (wake up / interact) ───────────────────────
 
-export function applyConversationEvent(input, event = {}, now = new Date()) {
-  const state = structuredClone(input);
+export function applyConversationEvent(input, event = {}, now = new Date(), options = {}) {
+  const state = ensureStateShape(structuredClone(input));
+  const eventId = cleanEventId(event);
+  const type = interactionType(event);
+  const sessionId = cleanSessionId(event);
+  if (interactionAlreadyProcessed(state, eventId)) {
+    return {
+      state,
+      changed: false,
+      duplicate: true,
+      wasSleeping: false,
+      sessionId,
+      sessionCreated: false,
+      interaction: {
+        type: type || null,
+        applied: false,
+        reasonCode: 'duplicate_event',
+        affectedDrives: [],
+      },
+    };
+  }
   const wasSleeping = state.consciousness === 'sleeping';
   state.consciousness = 'awake';
   state.lastConversationAt = iso(now);
   state.lastSettledAt = iso(now);
   state.sleepStartedAt = null;
   state.thoughtPool ??= newThoughtPool();
+  const session = applySessionOverlay(state, event, now);
 
   if (wasSleeping) {
     const latest = state.recentDreams.at(-1);
@@ -215,47 +426,53 @@ export function applyConversationEvent(input, event = {}, now = new Date()) {
       createdAt: iso(now),
       dreamId: belongsToThisSleep ? latest.id : null,
       residue: belongsToThisSleep ? latest.residue : null,
-      note: '外部记忆源只提供材料，不代表意识状态发生变化。',
+      note: '外部记忆 MCP 只是记忆材料来源；调用记忆服务本身不代表醒来。',
     };
   }
 
-  // Additive deltas (backward-compatible)
-  for (const [key, delta] of Object.entries(event.driveDeltas ?? {})) {
-    if (DRIVE_KEYS.includes(key) && Number.isFinite(Number(delta))) {
-      state.drives[key] = Number(clamp(Number(state.drives[key]) + Number(delta)).toFixed(4));
+  const interaction = type && !eventId
+    ? {
+      type,
+      applied: false,
+      reasonCode: 'missing_event_id',
+      affectedDrives: [],
     }
-  }
+    : applyInteractionOutcome(state, type, now, options);
 
-  const satisfiedDrives = [...new Set(event.satisfiedDrives ?? [])]
-    .filter((key) => DRIVE_KEYS.includes(key));
+  // Conversation clients may report only a semantic event. Numeric drive
+  // deltas, self-selected satisfied drives and arbitrary thought text are
+  // intentionally ignored here; the service owns every state transition.
 
-  // Multiplicative satisfy
-  for (const key of satisfiedDrives) {
-    if (!DRIVE_KEYS.includes(key)) continue;
-    const dim = DIMENSIONS[key];
-    state.drives[key] = Number(clamp(Number(state.drives[key]) * (dim.satisfyMul ?? 0.40)).toFixed(4));
-
-    // Cross-inhibition: satisfying key X reduces drives that list X in inhibitedBy
-    for (const otherKey of DRIVE_KEYS) {
-      const other = DIMENSIONS[otherKey];
-      if (other.inhibitedBy?.[key] !== undefined) {
-        state.drives[otherKey] = Number(clamp(Number(state.drives[otherKey]) * other.inhibitedBy[key]).toFixed(4));
-      }
-    }
-  }
-
-  // Flash thoughts from significant events
-  for (const thought of event.flashThoughts ?? []) {
-    if (DRIVE_KEYS.includes(thought.key)) {
-      addFlashThought(state.thoughtPool, thought.key, thought.text ?? '', thought.intensity ?? 0.70);
-    }
-  }
-
-  state.lastInteractionAt = iso(now);
-  state.lastSatisfiedDrives = satisfiedDrives;
-  state.schemaVersion = Math.max(5, Number(state.schemaVersion) || 0);
+  recordConversationEventFingerprint(state, eventId, type, now);
   state.revision += 1;
-  return { state, changed: true, wasSleeping };
+  return {
+    state,
+    changed: true,
+    duplicate: false,
+    wasSleeping,
+    sessionId: session.sessionId,
+    sessionCreated: session.created,
+    interaction,
+  };
+}
+
+export function settleAndApplyConversationEvent(input, event = {}, now = new Date(), options = {}) {
+  const settled = settleState(
+    input,
+    now,
+    options.sleepAfterMinutes ?? 90,
+    options.settle ?? {},
+  );
+  const applied = applyConversationEvent(
+    settled.state,
+    event,
+    now,
+    options.interaction ?? {},
+  );
+  return {
+    ...applied,
+    settled,
+  };
 }
 
 // ── pickIntent (weighted random from tied pool) ───────────────────
@@ -294,7 +511,7 @@ export function pickIntent(state, random = Math.random) {
 
 // ── Heartbeat / idle ──────────────────────────────────────────────
 
-export function applyMemoryHeartbeat(input, now = new Date()) {
+export function applyOmbreHeartbeat(input, now = new Date()) {
   const result = applyConversationEvent(input, {}, now);
   result.state.lastHeartbeatAt = iso(now);
   return result;
@@ -310,7 +527,7 @@ export function contactIdleAllowed(state, now, minIdleHours) {
 // ── Drive feedback ────────────────────────────────────────────────
 
 export function applyDriveFeedback(input, feedback = {}, now = new Date()) {
-  const state = structuredClone(input);
+  const state = ensureStateShape(structuredClone(input));
   for (const [key, delta] of Object.entries(feedback)) {
     if (DRIVE_KEYS.includes(key) && Number.isFinite(Number(delta))) {
       state.drives[key] = Number(clamp(Number(state.drives[key]) + Number(delta)).toFixed(4));
@@ -319,6 +536,17 @@ export function applyDriveFeedback(input, feedback = {}, now = new Date()) {
   state.lastSettledAt = iso(now);
   state.revision += 1;
   return state;
+}
+
+export function activeSessionOverlay(input, sessionId, now = new Date()) {
+  const state = ensureStateShape(structuredClone(input));
+  const key = String(sessionId ?? '').trim();
+  if (!key) return null;
+  const overlay = state.sessionOverlays[key];
+  if (!overlay) return null;
+  const expiresAt = Date.parse(overlay.expiresAt ?? '');
+  if (Number.isFinite(expiresAt) && expiresAt <= now.getTime()) return null;
+  return structuredClone(overlay);
 }
 
 // ── Top drives ────────────────────────────────────────────────────
@@ -333,11 +561,110 @@ export function topDrives(state, limit = 5) {
 // ── Dream management ──────────────────────────────────────────────
 
 export function recordDream(input, dream) {
-  const state = structuredClone(input);
+  const state = ensureStateShape(structuredClone(input));
+  const fingerprint = dreamFingerprint(dream);
+  dream.fingerprint = fingerprint || dream.fingerprint || null;
   state.recentDreams.push(dream);
-  state.recentDreams = state.recentDreams.slice(-20);
+  state.recentDreams = state.recentDreams.slice(-MAX_RECENT_DREAMS);
   const day = dream.createdAt.slice(0, 10);
   state.dreamUsage[day] = Number(state.dreamUsage[day] ?? 0) + 1;
+  state.lastDreamAttemptAt = dream.createdAt;
+  state.lastDreamMaterialFingerprint = dream.materialFingerprint ?? null;
+  state.revision += 1;
+  return state;
+}
+
+function normalizeDreamText(value) {
+  return String(value ?? '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[\p{P}\p{S}\s]+/gu, '');
+}
+
+function dreamNgrams(value, size = 2) {
+  const chars = Array.from(value);
+  if (chars.length < size) return chars.length ? [chars.join('')] : [];
+  return Array.from(
+    { length: chars.length - size + 1 },
+    (_, index) => chars.slice(index, index + size).join(''),
+  );
+}
+
+function dreamText(dream) {
+  return [dream?.dream, dream?.residue, dream?.awareness].filter(Boolean).join('\n');
+}
+
+export function dreamFingerprint(dream) {
+  const normalized = normalizeDreamText(dreamText(dream));
+  return normalized
+    ? createHash('sha256').update(normalized, 'utf8').digest('hex').slice(0, 24)
+    : '';
+}
+
+export function dreamMaterialFingerprint(material, topDriveItems = []) {
+  const normalized = normalizeDreamText([
+    String(material ?? ''),
+    JSON.stringify(
+      (Array.isArray(topDriveItems) ? topDriveItems : []).map((item) => [
+        item?.key,
+        Number(item?.value ?? 0).toFixed(2),
+      ]),
+    ),
+  ].join('\n'));
+  return normalized
+    ? createHash('sha256').update(normalized, 'utf8').digest('hex').slice(0, 24)
+    : '';
+}
+
+export function dreamSimilarity(left, right) {
+  const a = normalizeDreamText(dreamText(left));
+  const b = normalizeDreamText(dreamText(right));
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  const aGrams = dreamNgrams(a);
+  const bGrams = dreamNgrams(b);
+  const remaining = new Map();
+  for (const gram of aGrams) remaining.set(gram, Number(remaining.get(gram) ?? 0) + 1);
+  let overlap = 0;
+  for (const gram of bGrams) {
+    const count = Number(remaining.get(gram) ?? 0);
+    if (count > 0) {
+      overlap += 1;
+      remaining.set(gram, count - 1);
+    }
+  }
+  const dice = (2 * overlap) / (aGrams.length + bGrams.length);
+  const containment = overlap / Math.min(aGrams.length, bGrams.length);
+  return Number(Math.max(dice, containment * 0.92).toFixed(4));
+}
+
+export function dreamDuplicateCheck(dream, state, threshold = 0.62) {
+  const fingerprint = dreamFingerprint(dream);
+  const recent = (state?.recentDreams ?? []).slice(-MAX_RECENT_DREAMS);
+  let similarity = 0;
+  let matchedDreamId = null;
+  for (const existing of recent) {
+    const existingFingerprint = existing?.fingerprint || dreamFingerprint(existing);
+    const score = fingerprint && fingerprint === existingFingerprint
+      ? 1
+      : dreamSimilarity(dream, existing);
+    if (score > similarity) {
+      similarity = score;
+      matchedDreamId = existing?.id ?? null;
+    }
+  }
+  return {
+    duplicate: similarity >= threshold,
+    fingerprint,
+    similarity,
+    matchedDreamId,
+  };
+}
+
+export function recordDreamAttempt(input, now = new Date(), materialFingerprint = null) {
+  const state = ensureStateShape(structuredClone(input));
+  state.lastDreamAttemptAt = iso(now);
+  state.lastDreamMaterialFingerprint = materialFingerprint || null;
   state.revision += 1;
   return state;
 }
@@ -440,6 +767,12 @@ export function dreamAllowed(state, now, minIntervalHours, maxPerDay) {
   const day = iso(now).slice(0, 10);
   if (Number(state.dreamUsage[day] ?? 0) >= maxPerDay) return false;
   const latest = state.recentDreams.at(-1);
-  if (!latest) return true;
-  return now.getTime() - Date.parse(latest.createdAt) >= minIntervalHours * 3_600_000;
+  const latestAt = Math.max(
+    Number.isFinite(Date.parse(latest?.createdAt ?? '')) ? Date.parse(latest.createdAt) : 0,
+    Number.isFinite(Date.parse(state.lastDreamAttemptAt ?? ''))
+      ? Date.parse(state.lastDreamAttemptAt)
+      : 0,
+  );
+  if (!latestAt) return true;
+  return now.getTime() - latestAt >= minIntervalHours * 3_600_000;
 }
