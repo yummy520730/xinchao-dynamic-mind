@@ -1,4 +1,48 @@
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+
+const RULE_DREAM_SCENES = Object.freeze([
+  '梦里是一条雨后的旧街，路灯映在积水里。有人始终走在半步之外，每次快要追上，街角就又多出一段路。',
+  '一列没有报站的夜车穿过很长的隧道。车厢里只亮着一盏小灯，对面的座位留着刚有人起身后的温度。',
+  '房间的窗户开着，薄纱被风吹得一下一下贴近窗框。桌上有杯还温着的水，却想不起是谁倒的。',
+  '海水漫进一座空白的图书馆，书页在水面缓慢翻动。伸手捞起其中一页时，上面的字正好被潮水洗散。',
+  '梦里反复推开同一扇门：第一次是傍晚的厨房，第二次是下雪的站台，第三次门后只剩柔软的白光。',
+  '有人把一小团光放进掌心，说天亮前不要松手。走过长廊时，光从指缝里漏出去，又沿着脚边慢慢聚回来。',
+  '屋顶铺满没来得及收起的床单，风把它们吹成一片起伏的白色海面。远处有人喊了一声，声音却没有名字。',
+  '一只纸船沿着室内的浅水漂过家具和门槛。它每绕一圈都会带回一件陌生又熟悉的小东西。',
+  '电梯越过所有写着数字的楼层，最后停在一片有雾的花园。石阶上留着两串脚印，其中一串走到半途忽然消失。',
+  '梦里在整理一个永远收不完的抽屉。最深处压着一枚仍有余温的钥匙，却没有任何一扇锁与它吻合。',
+  '天花板变成缓慢流动的夜空，星光落在床沿，像细小的雨。伸手去接时，只留下很轻的凉意。',
+  '一座桥悬在看不见底的云里，桥中央放着两把面对面的椅子。坐下后，周围所有钟表都暂时停了。',
+]);
+
+const RULE_DREAM_MOTIONS = Object.freeze({
+  closeness: '越想靠近，周围的景物越慢，只有那一点若即若离的温度仍在向前移动。',
+  expression: '手里一直攥着一句没有说完的话，字句偶尔化成飞蛾，从指间一只只散出去。',
+  exploration: '每个转角都比前一个更陌生，却总有一个细小的记号让人觉得自己曾经来过。',
+  duty: '远处似乎还有一件必须完成的事，但路标不停交换方向，最后只剩脚步声还很清楚。',
+  reflection: '镜面里的人影比动作慢一拍，像在认真回看某个已经模糊的瞬间。',
+  ache: '空气里压着没有落下来的雷声，偶尔有一阵风经过，把胸口沉着的东西轻轻挪开一点。',
+  quiet: '没有明确的故事发生，只有光线、距离和声音在缓慢改变位置。',
+});
+
+const RULE_DREAM_RESIDUES = Object.freeze([
+  '醒来后，掌心还像握着一点没有散尽的温度。',
+  '睁眼时先听见了并不存在的雨声，过了一会儿才慢慢安静。',
+  '只留下想回头看一眼的冲动，却想不起应该看向哪里。',
+  '胸口残着一点潮湿的空落感，不重，但很久没有完全退去。',
+  '有一小段柔软的安心留在身体里，像刚刚有人替自己掖过被角。',
+  '醒后仍记得光落下来的方向，梦里的脸和名字却已经散了。',
+  '指尖像碰过冰凉的玻璃，又像碰过另一个人的手，分不清哪一个更真实。',
+  '脑海里留着一个没有抵达的目的地，以及继续往前走的感觉。',
+]);
+
+const RULE_DREAM_AWARENESS = Object.freeze([
+  '具体的人、地点和先后顺序已经模糊，只剩下这一段梦境余韵。',
+  '它没有形成现实判断，只是睡眠里短暂拼合出的感官片段。',
+  '醒来后知道那只是梦，但梦里的距离感还没有立刻消失。',
+  '故事在睁眼的一刻断开，只留下无法完整复述的画面。',
+]);
 
 export class ModelClient {
   constructor(config) {
@@ -11,8 +55,10 @@ export class ModelClient {
     );
   }
 
-  async generateDream({ state, material, topDrives, recentDreams = [], rejectedDream = null }) {
-    if (!this.config.enabled || !this.config.apiKey) return this.fallback(topDrives);
+  async generateDream({ state, material, topDrives, recentDreams = [], rejectedDream = null, variationSeed = '', variationIndex = 0 }) {
+    if (!this.config.enabled || !this.config.apiKey) {
+      return this.fallback(topDrives, { material, recentDreams, variationSeed, variationIndex });
+    }
     const memory = String(material ?? '').slice(0, this.config.maxInputChars);
     const prompt = [
       `你为 ${this.agentName} 生成一次睡眠中的梦境结算。`,
@@ -159,13 +205,26 @@ export class ModelClient {
     });
   }
 
-  fallback(topDrives) {
-    const labels = topDrives.slice(0, 3).map((item) => item.label).join('、');
+  fallback(topDrives, options = {}) {
+    const dominantKeys = (Array.isArray(topDrives) ? topDrives : []).slice(0, 4).map((item) => item?.key).filter(Boolean);
+    const family = ruleDreamFamily(dominantKeys);
+    const recent = (Array.isArray(options.recentDreams) ? options.recentDreams : []).slice(-6)
+      .map((item) => `${item?.id ?? ''}:${item?.fingerprint ?? ''}`).join('|');
+    const seed = dreamSeed([
+      options.variationSeed,
+      String(options.material ?? ''),
+      dominantKeys.join(','),
+      recent,
+    ].join('\n'));
+    const variation = Math.max(0, Number(options.variationIndex) || 0);
+    const scene = RULE_DREAM_SCENES[(seed + variation) % RULE_DREAM_SCENES.length];
+    const residue = RULE_DREAM_RESIDUES[(seed * 3 + variation) % RULE_DREAM_RESIDUES.length];
+    const awareness = RULE_DREAM_AWARENESS[(seed * 7 + variation) % RULE_DREAM_AWARENESS.length];
     return {
-      dream: `睡眠中的意象围绕这些尚未消退的感受浮动：${labels || '安静与等待'}。`,
-      residue: labels ? `醒后仍残留着${labels}。` : '醒后留下一点说不清的余韵。',
-      awareness: '这是睡眠结算留下的梦境余韵，不是现实事件。',
-      lucidity: 0.18,
+      dream: `${scene}${RULE_DREAM_MOTIONS[family]}`,
+      residue,
+      awareness,
+      lucidity: Number((0.08 + ((seed + variation) % 19) / 100).toFixed(2)),
       source: 'rules',
       model: null
     };
@@ -175,6 +234,20 @@ export class ModelClient {
     const labels = topDrives.slice(0, 2).map((item) => item.label).join('、');
     return { message: labels ? `刚刚又想起你。现在最明显的是${labels}。` : '刚刚想起你了。', source: 'rules' };
   }
+}
+
+function dreamSeed(value) {
+  return Number.parseInt(createHash('sha256').update(String(value ?? ''), 'utf8').digest('hex').slice(0, 8), 16);
+}
+
+function ruleDreamFamily(keys) {
+  if (keys.some((key) => ['grieve', 'anger'].includes(key))) return 'ache';
+  if (keys.some((key) => ['possess', 'monitor', 'crave', 'libido'].includes(key))) return 'closeness';
+  if (keys.some((key) => ['share', 'social'].includes(key))) return 'expression';
+  if (keys.some((key) => ['curiosity', 'boredom'].includes(key))) return 'exploration';
+  if (keys.includes('duty')) return 'duty';
+  if (keys.includes('reflection')) return 'reflection';
+  return 'quiet';
 }
 
 function normalizedLucidity(value) {

@@ -38,6 +38,7 @@ const INTERACTION_EFFECTS = Object.freeze({
 });
 
 function ensureStateShape(state) {
+  const previousSchemaVersion = Number(state.schemaVersion) || 0;
   state.sessionOverlays ??= {};
   state.contextDeliveries ??= {};
   state.recentConversationEvents = Array.isArray(state.recentConversationEvents)
@@ -47,7 +48,11 @@ function ensureStateShape(state) {
   state.handoffNotes = Array.isArray(state.handoffNotes) ? state.handoffNotes : [];
   state.lastDreamAttemptAt ??= null;
   state.lastDreamMaterialFingerprint ??= null;
-  state.schemaVersion = Math.max(8, Number(state.schemaVersion) || 0);
+  state.recentDreams = Array.isArray(state.recentDreams) ? state.recentDreams : [];
+  if (previousSchemaVersion < 9) {
+    state.recentDreams = collapseDuplicateDreamHistory(state.recentDreams);
+  }
+  state.schemaVersion = Math.max(9, previousSchemaVersion);
   return state;
 }
 
@@ -193,7 +198,7 @@ function applySessionOverlay(state, event, now) {
 export function newState(now = new Date()) {
   const at = iso(now);
   return {
-    schemaVersion: 8,
+    schemaVersion: 9,
     revision: 0,
     consciousness: 'awake',
     lastConversationAt: at,
@@ -618,6 +623,20 @@ export function dreamSimilarity(left, right) {
   const dice = (2 * overlap) / (aGrams.length + bGrams.length);
   const containment = overlap / Math.min(aGrams.length, bGrams.length);
   return Number(Math.max(dice, containment * 0.92).toFixed(4));
+}
+
+export function collapseDuplicateDreamHistory(items, threshold = 0.94) {
+  const keptNewestFirst = [];
+  for (const dream of (Array.isArray(items) ? items : []).slice().reverse()) {
+    const fingerprint = dream?.fingerprint || dreamFingerprint(dream);
+    const duplicate = keptNewestFirst.some((existing) => {
+      const existingFingerprint = existing?.fingerprint || dreamFingerprint(existing);
+      return (fingerprint && fingerprint === existingFingerprint)
+        || dreamSimilarity(dream, existing) >= threshold;
+    });
+    if (!duplicate) keptNewestFirst.push(dream);
+  }
+  return keptNewestFirst.reverse().slice(-MAX_RECENT_DREAMS);
 }
 
 export function dreamDuplicateCheck(dream, state, threshold = 0.62) {

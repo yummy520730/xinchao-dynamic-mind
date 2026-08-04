@@ -47,7 +47,7 @@ const fromMeStore = new FromMeStore(config.fromMe.statePath, config.fromMe);
 const bridgeStreams = new Set();
 await oauth.init();
 let cyclePromise = null;
-const SYSTEM_VERSION = '2.4.0-lmc.1';
+const SYSTEM_VERSION = '2.4.0-lmc.2';
 
 function log(event, fields = {}) {
   console.log(JSON.stringify({ at: new Date().toISOString(), event, ...fields }));
@@ -135,17 +135,25 @@ async function runCycle() {
 
       const currentTopDrives = topDrives(state);
       const materialFingerprint = dreamMaterialFingerprint(material, currentTopDrives);
+      const variationSeed = `${materialFingerprint}:${now.toISOString()}`;
       let generated = null;
       let duplicate = null;
       let rejectedDream = null;
       for (let attempt = 1; attempt <= config.dreamRetryAttempts; attempt += 1) {
         try {
           generated = config.shadowMode
-            ? new ModelClient({ ...config.model, enabled: false }).fallback(currentTopDrives)
-            : await model.generateDream({ state, material, topDrives: currentTopDrives, recentDreams: state.recentDreams, rejectedDream });
+            ? new ModelClient({ ...config.model, enabled: false }).fallback(currentTopDrives, {
+              material, recentDreams: state.recentDreams, variationSeed, variationIndex: attempt - 1,
+            })
+            : await model.generateDream({
+              state, material, topDrives: currentTopDrives, recentDreams: state.recentDreams,
+              rejectedDream, variationSeed, variationIndex: attempt - 1,
+            });
         } catch (error) {
           log('dream_model_failed', { message: error.message });
-          generated = new ModelClient({ ...config.model, enabled: false }).fallback(currentTopDrives);
+          generated = new ModelClient({ ...config.model, enabled: false }).fallback(currentTopDrives, {
+            material, recentDreams: state.recentDreams, variationSeed, variationIndex: attempt - 1,
+          });
         }
         duplicate = dreamDuplicateCheck(generated, state, config.dreamDuplicateThreshold);
         if (!duplicate.duplicate) break;
@@ -935,7 +943,7 @@ const server = createServer(async (request, response) => {
 });
 
 server.listen(config.port, '0.0.0.0', async () => {
-  await store.read();
+  await store.update((state) => settleState(state, new Date(), config.sleepAfterMinutes, config.settle).state);
   if (config.bridge.enabled) await bridgeQueue.init();
   await fromMeStore.list();
   log('service_started', {

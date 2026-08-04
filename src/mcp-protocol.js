@@ -349,7 +349,7 @@ export async function handleMcpMessage(payload, handlers) {
         serverInfo: {
           name: 'xinchao-dynamic-mind',
           title: '心潮动态心智系统',
-          version: '2.4.0-lmc.1',
+          version: '2.4.0-lmc.2',
         },
         instructions: [
           '新窗口开始时调用 xinchao_context；服务端会绑定当前 MCP 连接，无需自行编写 session_id。',
