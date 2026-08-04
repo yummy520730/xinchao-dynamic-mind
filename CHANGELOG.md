@@ -2,34 +2,80 @@
 
 本项目遵循语义化版本。除非特别说明，所有外部模型、长期记忆、OAuth 与通知能力均保持默认关闭。
 
-## 2.3.2-lmc.2 — 2026-08-03
+## 2.4.0 — 2026-08-03
 
-- 真实且未重复的对话事件现在会记录为最后联系时间；不挂载可选的 `heartbeat.json` 时，闲置通知也能正常计时。
-- 同一事件的重复上报不会刷新最后联系时间，避免网络重试无限推迟通知。
-- 读取心潮状态、读取记忆和后台内部查询仍不会被当作真实联系。
+### 用户互动 Runtime Bridge
 
-## 2.3.2-lmc.1 — 2026-08-03
+- 新增持久化 `/bridge/v1/*` 服务端队列，提供健康检查、SSE 到期通知、一次性正文读取与严格 ACK。
+- Bridge 只接受 `user_interaction`、`user_note`、`scheduled_interaction`；梦境、思念、内部状态与 AI 自主活动不能自动注入窗口。
+- Dashboard 语义互动可幂等入队；另提供便签/预约创建和脱敏队列状态读取。
+- 新增独立 `BRIDGE_MACHINE_TOKEN`，必须至少 32 字符且不能复用 Service/Dashboard 凭据。
+- 新增过期、最大队列、失败重试状态与 30 天已送达审计保留边界。
 
-- 新增 Android 可用的 ntfy 通知通道，支持官方 `ntfy.sh` 或自建服务。
-- ntfy 支持私密随机主题、可选 Bearer Token、标题、标签和优先级。
-- Bark 与 ntfy 同时开启时优先 ntfy，避免同一条心潮重复推送。
-- 健康页新增 `ntfyEnabled` 与 `notifications.provider`。
-- 通知仍遵守原有的闲置时长、日上限和跨类型去重规则。
+### 验证
 
-## 2.3.1-lmc.1 — 2026-07-29
+- 新增队列持久化、去重、用户来源限制、HTTP 鉴权、真实投递信封与 ACK 回归测试。
 
-### LMC-5 兼容
+### 可视化与多端接入地基
 
-- 保留既有 `MEMORY_*` 内部桥变量、候选审核写入和 Zeabur `/app/state` 权限自检。
-- LMC 只发送不透明事件编号与语义互动类型；HTTP 会话事件也忽略客户端提交的驱动力数值、满足列表和任意念头文本。
-- 保留不同驱动力软上限，避免长期空闲后所有数值再次黏在 80。
+- 新增默认脱敏、固定结构的 Dashboard Snapshot，十二维花瓣、梦境星云和桌面/手机 UI 可共用同一数据契约。
+- 新增只读取结构化 Transition Journal 的时间线接口，支持 limit、type 和 since 过滤，不返回聊天、梦境或 handoff 正文。
+- 新增多终端接入清单，区分网页 Session、远程 MCP OAuth、远程 MCP Bearer 与服务端 HTTP Bearer，清单本身不含凭据。
+- 新增独立 Dashboard 访问口令换取 HttpOnly、SameSite 只读会话；默认关闭并要求使用不同于 `SERVICE_TOKEN` 的 32 位以上口令。
+- 梦境摘要与余韵文字默认不进入 Dashboard，只有自托管者显式设置 `DASHBOARD_INCLUDE_PRIVATE_TEXT=true` 才展示。
+- 新增独立 `packages/wake-bridge` 协议包，定义梦境余韵、思念内容、自主行动结果及 `pending_from_me` 的用户/AI 双通道信封与消费状态。
 
-### 梦境去重
+### 安全与测试
 
-- 规则梦先比较素材与驱动力指纹；相同输入不再反复生成同一固定梦。
-- 模型梦使用内容指纹和近似度去重，重复时最多换场景重试三次。
-- 跳过重复梦后记录尝试时间，避免每 15 分钟重试。
-- 写入 LMC 候选时使用稳定内容指纹，不再为同一梦分配新候选身份。
+- Dashboard 登录增加基础失败次数限制；会话只保存在进程内存，不写入 state 或日志。
+- Wake Bridge 拒绝 Authorization、Cookie、服务 Token、原始 prompt 和原始聊天字段，并限制 payload 大小。
+- 新增 Dashboard 投影、会话、接入清单、Journal 查询及 Wake Bridge 隐私回归测试。
+## 2.3.4 — 2026-08-01
+
+### 安全加固
+
+- 启动阶段拒绝 `.env.example` 的占位 `SERVICE_TOKEN`：忘记替换示例值时服务
+  直接报错并给出生成命令（`openssl rand -hex 32`），示例值永远不会成为
+  公开可查的真实凭据。
+- `SERVICE_TOKEN` 强制不少于 32 字符，弱 token 同样在启动阶段失败，
+  与鉴权比较使用的常量时间对比（`timingSafeEqual`）配套。
+- `SECURITY.md` 补充 `MCP_PATH_TOKEN` 的暴露面说明：URL 路径会进入反代与
+  CDN 日志、浏览器历史，该模式仅作为无法发送请求头的客户端的兼容回退，
+  优先使用 `Authorization` 头，并建议更频繁地轮换路径 token。
+
+### 兼容性
+
+- 已按文档生成随机 token 的现有部署不受影响；只有仍在使用占位值或
+  短于 32 字符 token 的部署会在升级后拒绝启动——这正是本次要拦下的情况。
+
+## 2.3.3 — 2026-07-31
+
+### 外部记忆兼容
+
+- 开启 OB 读取、写入或 Context 联动时，同时要求配置 `OMBRE_MCP_URL` 与
+  `OMBRE_MCP_TOKEN`；缺少任一项会在启动阶段明确失败，避免后台持续产生 401。
+- 文档明确外部记忆 token 只能保存在服务端环境变量中，不能使用 Dashboard
+  密码代替，也不能写入浏览器、URL 或公开仓库。
+- 默认行为不变：外部记忆读写和 Context 联动仍全部关闭。
+
+## 2.3.2 — 2026-07-31
+
+### 修复
+
+- 补齐 `POST /v1/handoff-note`，HTTP 客户端现在可以保存并在 Context Envelope 中读回短期交接便签。
+- HTTP 便签接受 `snake_case` 与 `camelCase` 字段，继续执行 1200 字上限、1–168 小时 TTL 和 `event_id` 幂等。
+- 修复 `/v1/heartbeat` 返回成功却没有刷新 `lastHeartbeatAt` 的问题。
+- 所有真实 `xinchao_event` 同时刷新在场时间，避免正在互动时被自主推送误判为长期离线。
+
+### 接入与隐私
+
+- 新增隐私优先的 Claude Code `UserPromptSubmit` hook，只发送会话 ID 与随机事件 ID。
+- 文档增加实时、均衡、兼容三种心跳档位，并明确 heartbeat 不等于 `breath`、不占用模型上下文。
+- 不建议直接把原始 `UserPromptSubmit` HTTP hook 指向心潮，以免完整 hook 请求体携带提示词正文。
+
+### 测试
+
+- 新增 HTTP 端到端回归测试，覆盖鉴权、heartbeat 状态更新、handoff 幂等与 Context Envelope 回读。
 
 ## 2.3.1 — 2026-07-29
 
@@ -74,3 +120,10 @@
 - 十二维驱动力、念头池、疲惫、睡眠、意图选择与影子模式。
 - 可选 OpenAI-compatible 模型、外部记忆 MCP 与 Bark 通知。
 - 本机安全默认部署、原子 JSON 状态持久化和 Node.js 原生测试。
+# 2.4.0-lmc.1
+
+- 合并上游 2.4 Dashboard、潮汐时间线和 Runtime Bridge。
+- 保留 LMC-5 只读召回、梦境候选审核、ntfy 与 Zeabur Volume 启动检查。
+- 十二维改用独立软上限，修复长期空闲后全部显示 80 的问题。
+- 对话客户端只能上报语义事件；数值、自选满足项和任意念头文本会被忽略。
+- 新增 `reassurance`、梦境重复拦截与 AI 私有主动留言箱。

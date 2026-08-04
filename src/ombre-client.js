@@ -8,36 +8,22 @@ export class OmbreClient {
   }
 
   async bridgePost(path, payload) {
-    if (!this.config.bridgeUrl) {
-      throw new Error('MEMORY_BRIDGE_URL is required for lmc5_bridge transport');
-    }
-    if (!this.config.bridgeToken) {
-      throw new Error('MEMORY_BRIDGE_TOKEN is required for lmc5_bridge transport');
-    }
+    if (!this.config.bridgeUrl) throw new Error('MEMORY_BRIDGE_URL is required for lmc5_bridge transport');
+    if (!this.config.bridgeToken) throw new Error('MEMORY_BRIDGE_TOKEN is required for lmc5_bridge transport');
     const response = await fetch(`${this.config.bridgeUrl}${path}`, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
+        'Content-Type': 'application/json', Accept: 'application/json',
         Authorization: `Bearer ${this.config.bridgeToken}`,
         'X-Memory-Caller': 'xinchao-dynamic-mind',
       },
-      body: JSON.stringify(payload),
-      redirect: 'manual',
-      signal: AbortSignal.timeout(15000),
+      body: JSON.stringify(payload), redirect: 'manual', signal: AbortSignal.timeout(15000),
     });
     const raw = await response.text();
     let data = {};
-    try {
-      data = raw ? JSON.parse(raw) : {};
-    } catch {
-      throw new Error(`LMC-5 bridge returned invalid JSON: HTTP ${response.status}`);
-    }
-    if (!response.ok) {
-      throw new Error(
-        `LMC-5 bridge failed: HTTP ${response.status} ${String(data.error ?? '').slice(0, 160)}`,
-      );
-    }
+    try { data = raw ? JSON.parse(raw) : {}; }
+    catch { throw new Error(`LMC-5 bridge returned invalid JSON: HTTP ${response.status}`); }
+    if (!response.ok) throw new Error(`LMC-5 bridge failed: HTTP ${response.status} ${String(data.error ?? '').slice(0, 160)}`);
     return data;
   }
 
@@ -72,7 +58,7 @@ export class OmbreClient {
           params: {
             protocolVersion: '2025-06-18',
             capabilities: {},
-            clientInfo: { name: 'xinchao-dynamic-mind', version: '2.3.2-lmc.2' },
+            clientInfo: { name: 'xinchao-dynamic-mind', version: '2.4.0-lmc.1' },
           },
         });
         if (!this.sessionId) throw new Error('Ombre MCP did not return a session id');
@@ -99,8 +85,7 @@ export class OmbreClient {
     if (this.config.transport === 'lmc5_bridge') {
       const result = await this.bridgePost('/bridge/xinchao/recall', {
         query: '近期重要记忆、情绪、关系变化和未完成事项；排除以前由心潮生成的梦境',
-        max_results: this.config.breathMaxResults,
-        max_tokens: this.config.breathMaxTokens,
+        max_results: this.config.breathMaxResults, max_tokens: this.config.breathMaxTokens,
         exclude_sources: ['xinchao'],
       });
       return String(result.context ?? '').slice(0, 10000);
@@ -116,9 +101,8 @@ export class OmbreClient {
   async daytimeMaterial() {
     if (this.config.transport === 'lmc5_bridge') {
       const result = await this.bridgePost('/bridge/xinchao/recall', {
-        query: '白天自然浮现的近期记忆、具体细节、未说完的话和当下牵挂；不要返回系统配置、技术信息或以前由心潮生成的梦境',
-        max_results: this.config.breathMaxResults,
-        max_tokens: this.config.breathMaxTokens,
+        query: '白天自然浮现的近期记忆、具体细节、未说完的话和当下牵挂；排除以前由心潮生成的梦境',
+        max_results: this.config.breathMaxResults, max_tokens: this.config.breathMaxTokens,
         exclude_sources: ['xinchao'],
       });
       return String(result.context ?? '').slice(0, 10000);
@@ -134,10 +118,7 @@ export class OmbreClient {
   async recentContinuityMaterial(maxTokens = this.config.breathMaxTokens) {
     if (this.config.transport === 'lmc5_bridge') {
       const result = await this.bridgePost('/bridge/xinchao/recall', {
-        query: [
-          '新窗口近期连续性：只返回最近发生了什么，以及仍直接影响现在的人物与关系变化、生活重点和未完成约定。',
-          '不要返回核心准则、自我基岩、部署信息或以前由心潮生成的梦境。',
-        ].join(''),
+        query: '新窗口近期连续性：只返回最近事件、人物关系变化、生活重点和未完成约定；排除基岩、部署信息和心潮梦境。',
         max_results: Math.max(3, Math.min(8, Number(this.config.breathMaxResults) || 3)),
         max_tokens: Math.max(200, Math.min(3000, Number(maxTokens) || 1600)),
         exclude_sources: ['xinchao'],
@@ -171,20 +152,13 @@ export class OmbreClient {
       '说明：这是睡眠结算产生的梦境，不是现实事件；调用外部记忆服务不等于醒来。'
     ].join('\n');
     if (this.config.transport === 'lmc5_bridge') {
-      const stableFingerprint = String(
-        dream.fingerprint
-        || createHash('sha256').update(content, 'utf8').digest('hex').slice(0, 24),
-      );
+      const stableFingerprint = String(dream.fingerprint || createHash('sha256').update(content, 'utf8').digest('hex').slice(0, 24));
       const result = await this.bridgePost('/bridge/xinchao/candidates', {
         external_id: `dream:${stableFingerprint}`,
         content_fingerprint: stableFingerprint,
         title: `心潮梦境 · ${String(dream.createdAt ?? '').slice(0, 16).replace('T', ' ')}`,
-        content,
-        category: 'episode',
-        thread: 'reflection',
-        importance: 5.5,
-        privacy_scope: 'personal',
-        relation_terms: ['心潮', '梦境', dream.source ?? 'rules'],
+        content, category: 'episode', thread: 'reflection', importance: 5.5,
+        privacy_scope: 'personal', relation_terms: ['心潮', '梦境', dream.source ?? 'rules'],
       });
       return String(result.candidate_id ?? '');
     }

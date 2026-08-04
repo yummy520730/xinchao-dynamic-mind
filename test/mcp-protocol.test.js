@@ -28,10 +28,11 @@ function handlers() {
       duplicate: false,
       received: note,
     }),
+    fromMe: async (entry) => ({ id: 'from-me-1', duplicate: false, received: entry }),
   };
 }
 
-test('MCP initialize advertises the 2.3.2-lmc.2 tool server', async () => {
+test('MCP initialize advertises the 2.4.0 tool server', async () => {
   const result = await handleMcpMessage({
     jsonrpc: '2.0',
     id: 1,
@@ -41,7 +42,7 @@ test('MCP initialize advertises the 2.3.2-lmc.2 tool server', async () => {
   assert.equal(result.status, 200);
   assert.equal(result.body.result.protocolVersion, '2025-06-18');
   assert.equal(result.body.result.serverInfo.name, 'xinchao-dynamic-mind');
-  assert.equal(result.body.result.serverInfo.version, '2.3.2-lmc.2');
+  assert.equal(result.body.result.serverInfo.version, '2.4.0-lmc.1');
   assert.equal(result.body.result.capabilities.tools.listChanged, false);
 });
 
@@ -53,7 +54,7 @@ test('tools/list exposes context, event and short handoff note tools', async () 
   }, handlers());
   assert.deepEqual(
     result.body.result.tools.map((tool) => tool.name),
-    ['xinchao_context', 'xinchao_event', 'xinchao_handoff_note'],
+    ['xinchao_context', 'xinchao_event', 'xinchao_handoff_note', 'xinchao_from_me'],
   );
   assert.equal(result.body.result.tools[0].annotations.readOnlyHint, true);
   assert.equal(result.body.result.tools[1].annotations.destructiveHint, false);
@@ -177,4 +178,13 @@ test('initialized notification uses an empty 202 response', async () => {
   }, handlers());
   assert.equal(result.status, 202);
   assert.equal(result.body, null);
+});
+
+test('xinchao_from_me is an AI-owned bounded outbox tool', async () => {
+  const result = await handleMcpMessage({
+    jsonrpc:'2.0', id:20, method:'tools/call',
+    params:{ name:'xinchao_from_me', arguments:{ event_id:'ai-note-0001', kind:'pending_from_me', message:'等你回来。', ttl_hours:48 } },
+  }, handlers());
+  assert.equal(result.body.result.isError, false);
+  assert.equal(result.body.result.structuredContent.received.message, '等你回来。');
 });

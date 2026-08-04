@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
-import { loadConfig } from './config.js';
-import { applyDriveFeedback, applyOmbreHeartbeat, barkAllowed, breathDreamContext, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, dreamDuplicateCheck, dreamMaterialFingerprint, newState, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, recordDreamAttempt, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleState, topDrives } from './engine.js';
+import { loadConfig, validateConfig } from './config.js';
+import { INTERACTION_TYPES, applyDriveFeedback, applyOmbreHeartbeat, barkAllowed, breathDreamContext, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, dreamDuplicateCheck, dreamMaterialFingerprint, newState, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, recordDreamAttempt, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleState, topDrives } from './engine.js';
 import { selectUniqueBark } from './bark-dedupe.js';
 import { StateStore } from './state-store.js';
 import { ModelClient } from './model-client.js';
@@ -14,11 +14,19 @@ import { TransitionJournal } from './transition-journal.js';
 import { handleMcpMessage } from './mcp-protocol.js';
 import { OAuthProvider } from './oauth-provider.js';
 import { recordHandoffNote } from './handoff-notes.js';
+import { DashboardAuth } from './dashboard-auth.js';
+import { buildConnectionManifest, buildDashboardSnapshot } from './dashboard-projection.js';
+import { BRIDGE_SERVER_PROTOCOL, BRIDGE_STREAM_PROTOCOL, BridgeQueue } from './bridge-queue.js';
+import { FromMeStore } from './from-me-store.js';
 
-const config = loadConfig();
+const config = validateConfig(loadConfig());
 if (!config.serviceToken) throw new Error('SERVICE_TOKEN is required');
-if (config.ntfy.enabled && !/^[A-Za-z0-9_-]{20,128}$/.test(config.ntfy.topic)) {
-  throw new Error('NTFY_TOPIC must be a private random 20-128 character topic');
+// 拒绝占位值和弱 token —— 忘了换示例值就启动，等于把钥匙印在说明书上。
+if (/^replace-with/i.test(config.serviceToken)) {
+  throw new Error('SERVICE_TOKEN is still the placeholder from .env.example — generate a real one: openssl rand -hex 32');
+}
+if (config.serviceToken.length < 32) {
+  throw new Error('SERVICE_TOKEN must be at least 32 characters — generate one: openssl rand -hex 32');
 }
 
 const store = new StateStore(config.statePath, () => newState());
@@ -26,13 +34,20 @@ const model = new ModelClient(config.model);
 const ombre = new OmbreClient(config.ombre);
 const notificationProvider = config.ntfy.enabled ? 'ntfy' : config.bark.enabled ? 'bark' : 'none';
 const notificationEnabled = notificationProvider !== 'none';
-const notifier = notificationProvider === 'ntfy'
-  ? new NtfyClient(config.ntfy)
-  : new BarkClient(config.bark);
+const notifier = notificationProvider === 'ntfy' ? new NtfyClient(config.ntfy) : new BarkClient(config.bark);
 const journal = new TransitionJournal(config.journalPath);
 const oauth = new OAuthProvider(config.oauth, (event, fields = {}) => log(event, fields));
+const dashboardAuth = new DashboardAuth({
+  ...config.dashboard,
+  ttlSeconds: config.dashboard.sessionTtlSeconds,
+  secureCookies: config.dashboard.publicBaseUrl.startsWith('https://'),
+});
+const bridgeQueue = new BridgeQueue(config.bridge.statePath, config.bridge);
+const fromMeStore = new FromMeStore(config.fromMe.statePath, config.fromMe);
+const bridgeStreams = new Set();
 await oauth.init();
 let cyclePromise = null;
+const SYSTEM_VERSION = '2.4.0-lmc.1';
 
 function log(event, fields = {}) {
   console.log(JSON.stringify({ at: new Date().toISOString(), event, ...fields }));
@@ -118,109 +133,55 @@ async function runCycle() {
         catch (error) { log('ombre_read_failed', { message: error.message }); }
       }
 
-      const driveSnapshot = topDrives(state);
-      const materialFingerprint = dreamMaterialFingerprint(material, driveSnapshot);
-      const deterministicDream = config.shadowMode || !config.model.enabled || !config.model.apiKey;
-      const repeatedMaterial = Boolean(
-        deterministicDream
-        && materialFingerprint
-        && state.lastDreamMaterialFingerprint === materialFingerprint
-        && state.recentDreams?.length,
-      );
-
-      let dream = null;
+      const currentTopDrives = topDrives(state);
+      const materialFingerprint = dreamMaterialFingerprint(material, currentTopDrives);
+      let generated = null;
       let duplicate = null;
-      if (!repeatedMaterial) {
-        let rejectedDream = null;
-        const attempts = deterministicDream ? 1 : config.dreamRetryAttempts;
-        for (let attempt = 1; attempt <= attempts; attempt += 1) {
-          let generated;
-          if (deterministicDream) {
-            generated = new ModelClient({ ...config.model, enabled: false }).fallback(driveSnapshot);
-          } else {
-            try {
-              generated = await model.generateDream({
-                state,
-                material,
-                topDrives: driveSnapshot,
-                recentDreams: state.recentDreams?.slice(-5) ?? [],
-                rejectedDream,
-              });
-            } catch (error) {
-              log('dream_model_failed', { message: error.message });
-              generated = new ModelClient({ ...config.model, enabled: false }).fallback(driveSnapshot);
-            }
-          }
-          const candidate = {
-            id: randomUUID(),
-            createdAt: now.toISOString(),
-            materialFingerprint,
-            ...generated,
-            ombreBucketId: null,
-          };
-          duplicate = dreamDuplicateCheck(candidate, state, config.dreamDuplicateThreshold);
-          if (!duplicate.duplicate) {
-            dream = { ...candidate, fingerprint: duplicate.fingerprint };
-            break;
-          }
-          rejectedDream = candidate;
-          log('dream_duplicate_rejected', {
-            attempt,
-            similarity: duplicate.similarity,
-            matchedDreamId: duplicate.matchedDreamId,
-          });
+      let rejectedDream = null;
+      for (let attempt = 1; attempt <= config.dreamRetryAttempts; attempt += 1) {
+        try {
+          generated = config.shadowMode
+            ? new ModelClient({ ...config.model, enabled: false }).fallback(currentTopDrives)
+            : await model.generateDream({ state, material, topDrives: currentTopDrives, recentDreams: state.recentDreams, rejectedDream });
+        } catch (error) {
+          log('dream_model_failed', { message: error.message });
+          generated = new ModelClient({ ...config.model, enabled: false }).fallback(currentTopDrives);
         }
+        duplicate = dreamDuplicateCheck(generated, state, config.dreamDuplicateThreshold);
+        if (!duplicate.duplicate) break;
+        rejectedDream = generated;
+        log('dream_duplicate_rejected', { attempt, similarity: duplicate.similarity, matchedDreamId: duplicate.matchedDreamId });
       }
 
-      if (!dream) {
-        state = await updateState({
-          type: 'dream_duplicate_skipped',
-          source: repeatedMaterial ? 'material-fingerprint' : 'content-fingerprint',
-          details: {
-            repeatedMaterial,
-            similarity: duplicate?.similarity ?? null,
-            matchedDreamId: duplicate?.matchedDreamId ?? null,
-          },
-          at: now,
-        }, (latest) => recordDreamAttempt(latest, now, materialFingerprint));
-        log('dream_duplicate_skipped', {
-          reason: repeatedMaterial ? 'same_material_and_drive_state' : 'same_dream_content',
-          similarity: duplicate?.similarity ?? null,
-          revision: state.revision,
-        });
-      } else {
-        if (!config.shadowMode && config.ombre.writeEnabled) {
-          try { dream.ombreBucketId = await ombre.storeDream(dream); }
-          catch (error) { log('ombre_write_failed', { message: error.message }); }
-        }
-
-        state = await updateState({
-          type: 'dream_recorded',
-          source: config.shadowMode ? 'rule-seed' : 'model',
-          details: { dreamCreated: true, fingerprint: dream.fingerprint },
-          at: now,
-        }, (latest) => {
-          if (!dreamAllowed(latest, now, config.dreamMinIntervalHours, config.dreamMaxPerDay)) return latest;
-          const latestDuplicate = dreamDuplicateCheck(
-            dream,
-            latest,
-            config.dreamDuplicateThreshold,
-          );
-          return latestDuplicate.duplicate
-            ? recordDreamAttempt(latest, now, materialFingerprint)
-            : recordDream(latest, dream);
-        });
-        dreamCreated = true;
-        log('dream_settled', {
-          source: dream.source,
-          shadow: config.shadowMode,
-          usedMemory: Boolean(material),
-          fingerprint: dream.fingerprint,
-          revision: state.revision,
-        });
+      if (duplicate?.duplicate) {
+        state = await updateState({ type: 'dream_duplicate_skipped', source: 'dedupe', at: now },
+          (latest) => recordDreamAttempt(latest, now, materialFingerprint));
+        log('dream_duplicate_skipped', { similarity: duplicate.similarity, revision: state.revision });
+        return { state, dreamCreated, barkSent, daytimeSent };
       }
 
-      if (dream && !config.shadowMode && notificationEnabled && dreamContactIsIdle && barkAllowed(state, now, config.bark.minIntervalHours, config.bark.maxPerDay, 'dream')) {
+      const dream = {
+        id: randomUUID(), createdAt: now.toISOString(), ...generated,
+        fingerprint: duplicate?.fingerprint ?? null, materialFingerprint, ombreBucketId: null,
+      };
+      if (!config.shadowMode && config.ombre.writeEnabled) {
+        try { dream.ombreBucketId = await ombre.storeDream(dream); }
+        catch (error) { log('ombre_write_failed', { message: error.message }); }
+      }
+
+      state = await updateState({
+        type: 'dream_recorded',
+        source: config.shadowMode ? 'rule-seed' : 'model',
+        details: { dreamCreated: true },
+        at: now,
+      }, (latest) => {
+        if (!dreamAllowed(latest, now, config.dreamMinIntervalHours, config.dreamMaxPerDay)) return latest;
+        return recordDream(latest, dream);
+      });
+      dreamCreated = true;
+      log('dream_settled', { source: dream.source, shadow: config.shadowMode, usedBreath: Boolean(material), revision: state.revision });
+
+      if (!config.shadowMode && notificationEnabled && dreamContactIsIdle && barkAllowed(state, now, config.bark.minIntervalHours, config.bark.maxPerDay, 'dream')) {
         try {
           let modelFailed = false;
           const selected = await selectUniqueBark({
@@ -250,10 +211,10 @@ async function runCycle() {
                 at: now,
               }, (latest) => recordBark(latest, now, { kind: 'dream', message: selected.message }));
               barkSent = true;
-              log('bark_sent', { kind: 'dream', provider: notificationProvider, revision: state.revision });
+              log('bark_sent', { kind: 'dream', revision: state.revision });
             }
           }
-        } catch (error) { log('bark_failed', { kind: 'dream', provider: notificationProvider, message: error.message }); }
+        } catch (error) { log('bark_failed', { kind: 'dream', message: error.message }); }
       }
     }
 
@@ -293,9 +254,9 @@ async function runCycle() {
               at: now,
             }, (latest) => recordBark(latest, now, { kind: 'autonomous_thought', message: selected.message }));
             barkSent = true;
-            log('bark_sent', { kind: 'autonomous_thought', provider: notificationProvider, source: selected.candidate?.source, revision: state.revision });
+            log('bark_sent', { kind: 'autonomous_thought', source: selected.candidate?.source, revision: state.revision });
           }
-        } catch (error) { log('bark_failed', { kind: 'autonomous_thought', provider: notificationProvider, message: error.message }); }
+        } catch (error) { log('bark_failed', { kind: 'autonomous_thought', message: error.message }); }
       }
     }
 
@@ -334,10 +295,10 @@ async function runCycle() {
               at: now,
             }, (latest) => recordDaytimeEmergence(latest, selected.message, now, config.daytime.timeZone));
             daytimeSent = true;
-            log('bark_sent', { kind: 'daytime_emergence', provider: notificationProvider, source: selected.candidate?.source, revision: state.revision });
+            log('bark_sent', { kind: 'daytime_emergence', source: selected.candidate?.source, revision: state.revision });
           }
         } catch (error) {
-          log('bark_failed', { kind: 'daytime_emergence', provider: notificationProvider, message: error.message });
+          log('bark_failed', { kind: 'daytime_emergence', message: error.message });
         }
       } else {
         log('daytime_emergence_skipped', { reason: selected.reason === 'duplicate' ? 'duplicate' : 'no_pushworthy_material' });
@@ -370,6 +331,29 @@ function auditEventFingerprint(value) {
 function authorized(request) {
   const supplied = request.headers.authorization?.replace(/^Bearer\s+/i, '') ?? '';
   return safeEqual(supplied, config.serviceToken);
+}
+
+function bridgeAuthorized(request) {
+  const supplied = request.headers.authorization?.replace(/^Bearer\s+/i, '') ?? '';
+  return Boolean(config.bridge.enabled) && safeEqual(supplied, config.bridge.machineToken);
+}
+
+function sendBridgeEvent(response, event, value) {
+  response.write(`event: ${event}\n`);
+  response.write(`data: ${JSON.stringify(value)}\n\n`);
+}
+
+async function publishReadyBridgeDeliveries() {
+  if (!config.bridge.enabled || !bridgeStreams.size) return;
+  const ready = await bridgeQueue.ready();
+  for (const delivery of ready) {
+    for (const response of bridgeStreams) {
+      sendBridgeEvent(response, 'delivery', {
+        protocol: BRIDGE_STREAM_PROTOCOL,
+        deliveryId: delivery.id,
+      });
+    }
+  }
 }
 
 function mcpPath(url) {
@@ -410,9 +394,43 @@ async function body(request) {
   return raw ? JSON.parse(raw) : {};
 }
 
-function send(response, status, value) {
-  response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+function send(response, status, value, extraHeaders = {}) {
+  response.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    ...extraHeaders,
+  });
   response.end(JSON.stringify(value));
+}
+
+function dashboardTimelineOptions(url) {
+  const types = url.searchParams.getAll('type')
+    .flatMap((value) => value.split(','))
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return {
+    limit: url.searchParams.get('limit') ?? 50,
+    since: url.searchParams.get('since') ?? '',
+    types,
+  };
+}
+
+async function dashboardPayload(pathname, url) {
+  if (pathname.endsWith('/snapshot')) {
+    return buildDashboardSnapshot(await store.read(), config, new Date());
+  }
+  if (pathname.endsWith('/timeline')) {
+    return {
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      items: await journal.list(dashboardTimelineOptions(url)),
+    };
+  }
+  if (pathname.endsWith('/connect')) return buildConnectionManifest(config);
+  if (pathname.endsWith('/from-me')) {
+    return { schemaVersion: 1, generatedAt: new Date().toISOString(), items: await fromMeStore.list({ limit: url.searchParams.get('limit') }) };
+  }
+  return null;
 }
 
 function sendMcp(response, status, value, extraHeaders = {}) {
@@ -562,6 +580,74 @@ async function saveHandoffNote(note, source = 'mcp', now = new Date()) {
   };
 }
 
+function dashboardInteractionFromHttp(payload = {}) {
+  const allowedKeys = new Set(['event_id', 'eventId', 'interaction_type', 'interactionType', 'context_type', 'contextType', 'context_id', 'contextId']);
+  const unexpected = Object.keys(payload).filter((key) => !allowedKeys.has(key));
+  if (unexpected.length) throw new Error('interaction payload contains unsupported fields');
+  const eventId = String(payload.event_id ?? payload.eventId ?? '').trim();
+  const interactionType = String(payload.interaction_type ?? payload.interactionType ?? '').trim().toLowerCase();
+  if (eventId.length < 8 || eventId.length > 120) throw new Error('event_id must contain 8 to 120 characters');
+  if (!INTERACTION_TYPES.includes(interactionType)) throw new Error('interaction_type is not supported');
+  const contextType = String(payload.context_type ?? payload.contextType ?? '').trim();
+  const contextId = String(payload.context_id ?? payload.contextId ?? '').trim().slice(0, 120);
+  if (contextType && !['petal', 'dream_response'].includes(contextType)) throw new Error('context_type is not supported');
+  return {
+    sessionId: 'dashboard-interaction',
+    eventId,
+    interactionType,
+    contextType,
+    contextId,
+  };
+}
+
+const INTERACTION_BRIDGE_MESSAGES = Object.freeze({
+  affection: '用户刚刚给了你一个拥抱。',
+  companionship: '用户刚刚选择陪你待一会儿。',
+  sharing: '用户刚刚留下了想与你分享一件事的心意。',
+  reassurance: '用户刚刚回应了你的不安，想让你知道自己在这里。',
+  task_progress: '用户刚刚选择陪你推进一件共同待办。',
+  reconciliation: '用户刚刚主动回应了一次和解。',
+  intimacy: '用户刚刚主动靠近了你。',
+  conflict: '用户刚刚明确表达了一次冲突，需要在下次连接时被看见。',
+  loss: '用户刚刚回应了你的难过，愿意陪你一起承受。',
+});
+
+async function enqueueDashboardInteraction(event, result) {
+  if (!config.bridge.enabled || result.duplicate) return null;
+  const message = event.contextType === 'dream_response'
+    ? '用户刚刚回应了你的梦境余韵，愿意陪你消化这个梦。'
+    : INTERACTION_BRIDGE_MESSAGES[event.interactionType] ?? '用户刚刚从心潮小屋发来一次互动。';
+  const queued = await bridgeQueue.enqueue({
+    eventId: event.eventId,
+    reason: 'user_interaction',
+    message,
+  });
+  await publishReadyBridgeDeliveries();
+  return { queued: true, deliveryId: queued.delivery.id, duplicate: queued.duplicate };
+}
+
+function bridgeDeliveryFromDashboard(payload = {}, now = new Date()) {
+  const allowed = new Set(['event_id', 'eventId', 'message', 'deliver_after', 'deliverAfter']);
+  const unexpected = Object.keys(payload).filter((key) => !allowed.has(key));
+  if (unexpected.length) throw new Error('bridge delivery only accepts event_id, message and deliver_after');
+  const eventId = String(payload.event_id ?? payload.eventId ?? '').trim();
+  const message = String(payload.message ?? '').replace(/\s+/g, ' ').trim();
+  const deliverAfter = payload.deliver_after ?? payload.deliverAfter ?? null;
+  if (eventId.length < 8 || eventId.length > 120) throw new Error('event_id must contain 8 to 120 characters');
+  if (!message || message.length > 1200) throw new Error('message must contain 1 to 1200 characters');
+  const scheduled = deliverAfter && Date.parse(deliverAfter) > now.getTime();
+  return { eventId, message, deliverAfter, reason: scheduled ? 'scheduled_interaction' : 'user_note' };
+}
+
+function handoffNoteFromHttp(payload = {}) {
+  return {
+    sessionId: payload.sessionId ?? payload.session_id,
+    eventId: payload.eventId ?? payload.event_id,
+    note: payload.note,
+    ttlHours: payload.ttlHours ?? payload.ttl_hours,
+  };
+}
+
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, 'http://localhost');
@@ -570,7 +656,7 @@ const server = createServer(async (request, response) => {
         ok: true,
         system: 'xinchao-dynamic-mind',
         mode: config.shadowMode ? 'shadow' : 'active',
-        version: '2.3.2-lmc.2',
+        version: SYSTEM_VERSION,
         port: config.port,
         stateWritable: true,
         memory: {
@@ -579,26 +665,124 @@ const server = createServer(async (request, response) => {
           writeEnabled: config.ombre.writeEnabled,
           configured: config.ombre.transport === 'lmc5_bridge'
             ? Boolean(config.ombre.bridgeUrl && config.ombre.bridgeToken)
-            : Boolean(config.ombre.url),
+            : Boolean(config.ombre.url && config.ombre.token),
         },
-        interaction: {
-          semanticEventsOnly: true,
-          maxEffectsPerDay: config.interaction.maxEffectsPerDay,
-        },
-        dreamDeduplication: {
-          enabled: true,
-          threshold: config.dreamDuplicateThreshold,
-        },
+        interaction: { semanticEventsOnly: true, maxEffectsPerDay: config.interaction.maxEffectsPerDay },
+        dreamDeduplication: { enabled: true, threshold: config.dreamDuplicateThreshold },
         modelEnabled: config.model.enabled,
         barkEnabled: config.bark.enabled,
         ntfyEnabled: config.ntfy.enabled,
-        notifications: {
-          enabled: notificationEnabled,
-          provider: notificationProvider,
-        },
+        notifications: { enabled: notificationEnabled, provider: notificationProvider },
+        bridgeEnabled: config.bridge.enabled,
       });
     }
     if (await oauth.handle(request, response, url)) return;
+    if (url.pathname.startsWith('/bridge/v1')) {
+      if (!config.bridge.enabled) return send(response, 404, { error: 'not found' });
+      if (!bridgeAuthorized(request)) return send(response, 401, { error: 'unauthorized' });
+      if (request.method === 'GET' && url.pathname === '/bridge/v1/health') {
+        return send(response, 200, { protocol: BRIDGE_SERVER_PROTOCOL, status: 'ok' });
+      }
+      if (request.method === 'GET' && url.pathname === '/bridge/v1/events') {
+        response.writeHead(200, {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-store, no-transform',
+          Connection: 'keep-alive',
+          'X-Accel-Buffering': 'no',
+        });
+        sendBridgeEvent(response, 'connected', { protocol: BRIDGE_STREAM_PROTOCOL });
+        bridgeStreams.add(response);
+        const heartbeat = setInterval(() => response.write(': heartbeat\n\n'), 20_000);
+        heartbeat.unref();
+        request.on('close', () => {
+          clearInterval(heartbeat);
+          bridgeStreams.delete(response);
+        });
+        await publishReadyBridgeDeliveries();
+        return;
+      }
+      const deliveryMatch = url.pathname.match(/^\/bridge\/v1\/deliveries\/([^/]+)$/);
+      if (deliveryMatch && request.method === 'GET') {
+        const delivery = await bridgeQueue.get(decodeURIComponent(deliveryMatch[1]));
+        return delivery ? send(response, 200, delivery) : send(response, 404, { error: 'delivery not found' });
+      }
+      const acknowledgementMatch = url.pathname.match(/^\/bridge\/v1\/deliveries\/([^/]+)\/ack$/);
+      if (acknowledgementMatch && request.method === 'POST') {
+        const payload = await body(request);
+        const item = await bridgeQueue.acknowledge(
+          decodeURIComponent(acknowledgementMatch[1]),
+          payload.status,
+          payload.code,
+        );
+        return item ? send(response, 200, { ok: true, deliveryId: item.id, status: item.status }) : send(response, 404, { error: 'delivery not found' });
+      }
+      return send(response, 404, { error: 'not found' });
+    }
+    if (url.pathname === '/dashboard/session') {
+      if (!config.dashboard.enabled) return send(response, 404, { error: 'not found' });
+      if (request.method !== 'POST') return send(response, 405, { error: 'method not allowed' }, { Allow: 'POST' });
+      const remoteAddress = request.socket.remoteAddress ?? 'unknown';
+      if (dashboardAuth.rateLimited(remoteAddress)) {
+        return send(response, 429, { error: 'too many attempts' }, { 'Retry-After': '60' });
+      }
+      const payload = await body(request);
+      const supplied = payload.accessToken ?? payload.access_token ?? payload.token ?? '';
+      if (!dashboardAuth.verifyAccessToken(supplied, remoteAddress)) {
+        return send(response, 401, { error: 'invalid credentials' });
+      }
+      const session = dashboardAuth.createSession();
+      log('dashboard_session_created', { sessionExpiresAt: session.expiresAt });
+      return send(response, 200, {
+        ok: true,
+        expiresAt: session.expiresAt,
+        profile: 'read-only-dashboard',
+      }, { 'Set-Cookie': dashboardAuth.sessionCookie(session.token) });
+    }
+    if (url.pathname === '/dashboard/logout') {
+      if (request.method !== 'POST') return send(response, 405, { error: 'method not allowed' }, { Allow: 'POST' });
+      dashboardAuth.destroyRequestSession(request);
+      return send(response, 200, { ok: true }, { 'Set-Cookie': dashboardAuth.clearCookie() });
+    }
+    if (url.pathname.startsWith('/dashboard/api/')) {
+      if (!dashboardAuth.validateRequest(request)) return send(response, 401, { error: 'unauthorized' });
+      if (url.pathname === '/dashboard/api/interactions') {
+        if (request.method !== 'POST') return send(response, 405, { error: 'method not allowed' }, { Allow: 'POST' });
+        try {
+          const event = dashboardInteractionFromHttp(await body(request));
+          const result = await recordConversationEvent(event, 'dashboard');
+          const bridge = await enqueueDashboardInteraction(event, result);
+          return send(response, 200, { ...result, bridge });
+        } catch (error) {
+          return send(response, 400, { error: error.message });
+        }
+      }
+      if (url.pathname === '/dashboard/api/bridge/deliveries') {
+        if (!config.bridge.enabled) return send(response, 503, { error: 'bridge disabled' });
+        if (request.method === 'GET') {
+          const items = await bridgeQueue.list({ limit: url.searchParams.get('limit') });
+          return send(response, 200, { items: items.map(({ message, ...item }) => ({ ...item, hasMessage: Boolean(message) })) });
+        }
+        if (request.method === 'POST') {
+          try {
+            const input = bridgeDeliveryFromDashboard(await body(request));
+            const result = await bridgeQueue.enqueue(input);
+            await publishReadyBridgeDeliveries();
+            return send(response, result.duplicate ? 200 : 201, {
+              queued: true,
+              duplicate: result.duplicate,
+              deliveryId: result.delivery.id,
+              deliverAfter: result.delivery.deliverAfter,
+            });
+          } catch (error) {
+            return send(response, 400, { error: error.message });
+          }
+        }
+        return send(response, 405, { error: 'method not allowed' }, { Allow: 'GET, POST' });
+      }
+      if (request.method !== 'GET') return send(response, 405, { error: 'method not allowed' }, { Allow: 'GET' });
+      const payload = await dashboardPayload(url.pathname, url);
+      return payload ? send(response, 200, payload) : send(response, 404, { error: 'not found' });
+    }
     if (config.mcp.enabled && mcpPath(url)) {
       if (!mcpAuthorized(request, url)) {
         if (oauth.enabled) response.setHeader('WWW-Authenticate', oauth.wwwAuthenticate());
@@ -635,6 +819,10 @@ const server = createServer(async (request, response) => {
           };
         },
         handoffNote: async (note) => saveHandoffNote(note, 'mcp'),
+        fromMe: async (entry) => {
+          const result = await fromMeStore.add(entry);
+          return { id: result.item.id, kind: result.item.kind, duplicate: result.duplicate, expiresAt: result.item.expiresAt };
+        },
       });
       if (payload?.method === 'initialize' || payload?.method === 'tools/call') {
         log('mcp_request', {
@@ -650,6 +838,39 @@ const server = createServer(async (request, response) => {
       });
     }
     if (!authorized(request)) return send(response, 401, { error: 'unauthorized' });
+
+    if (request.method === 'POST' && url.pathname === '/v1/dashboard/interactions') {
+      const event = dashboardInteractionFromHttp(await body(request));
+      const result = await recordConversationEvent(event, 'dashboard');
+      const bridge = await enqueueDashboardInteraction(event, result);
+      return send(response, 200, { ...result, bridge });
+    }
+    if (url.pathname === '/v1/dashboard/bridge/deliveries') {
+      if (!config.bridge.enabled) return send(response, 503, { error: 'bridge disabled' });
+      if (request.method === 'GET') {
+        const items = await bridgeQueue.list({ limit: url.searchParams.get('limit') });
+        return send(response, 200, { items: items.map(({ message, ...item }) => ({ ...item, hasMessage: Boolean(message) })) });
+      }
+      if (request.method === 'POST') {
+        const input = bridgeDeliveryFromDashboard(await body(request));
+        const result = await bridgeQueue.enqueue(input);
+        await publishReadyBridgeDeliveries();
+        return send(response, result.duplicate ? 200 : 201, { queued: true, duplicate: result.duplicate, deliveryId: result.delivery.id, deliverAfter: result.delivery.deliverAfter });
+      }
+    }
+    if (request.method === 'POST' && url.pathname === '/v1/from-me') {
+      const result = await fromMeStore.add(await body(request));
+      return send(response, result.duplicate ? 200 : 201, { id: result.item.id, kind: result.item.kind, duplicate: result.duplicate, expiresAt: result.item.expiresAt });
+    }
+    if (request.method === 'POST' && url.pathname === '/v1/notification-test') {
+      const pushed = await notifier.send(`心潮通知测试 · ${new Date().toLocaleString('zh-CN', { timeZone: config.settle.timeZone })}`);
+      return send(response, 200, { ok: true, provider: notificationProvider, sent: pushed.sent });
+    }
+
+    if (request.method === 'GET' && url.pathname.startsWith('/v1/dashboard/')) {
+      const payload = await dashboardPayload(url.pathname, url);
+      return payload ? send(response, 200, payload) : send(response, 404, { error: 'not found' });
+    }
 
     if (request.method === 'GET' && url.pathname === '/v1/state') {
       return send(response, 200, await store.read());
@@ -686,19 +907,14 @@ const server = createServer(async (request, response) => {
       const result = await runCycle();
       return send(response, 200, { revision: result.state.revision, consciousness: result.state.consciousness, dreamCreated: result.dreamCreated, barkSent: result.barkSent, daytimeSent: result.daytimeSent });
     }
-    if (request.method === 'POST' && url.pathname === '/v1/notification-test') {
-      if (!notificationEnabled) return send(response, 503, { error: 'notification channel disabled' });
-      const pushed = await notifier.send('心潮通知通道已连接。');
-      log('notification_test_sent', { provider: notificationProvider, sent: pushed.sent });
-      return send(response, pushed.sent ? 200 : 503, {
-        sent: pushed.sent,
-        provider: notificationProvider,
-      });
-    }
     if (request.method === 'POST' && (url.pathname === '/v1/conversation-event' || url.pathname === '/v1/heartbeat')) {
       const event = await body(request);
       const source = url.pathname === '/v1/heartbeat' ? 'heartbeat' : 'api';
       return send(response, 200, await recordConversationEvent(event, source));
+    }
+    if (request.method === 'POST' && url.pathname === '/v1/handoff-note') {
+      const payload = await body(request);
+      return send(response, 200, await saveHandoffNote(handoffNoteFromHttp(payload), 'api'));
     }
     if (request.method === 'POST' && url.pathname === '/v1/drive-feedback') {
       const payload = await body(request);
@@ -718,48 +934,24 @@ const server = createServer(async (request, response) => {
   }
 });
 
-async function start() {
-  // Fail immediately if a mounted volume is not writable. This prevents a
-  // seemingly healthy service from silently keeping only the initial state.
+server.listen(config.port, '0.0.0.0', async () => {
   await store.read();
-  await new Promise((resolve, reject) => {
-    const onError = (error) => reject(error);
-    server.once('error', onError);
-    server.listen(config.port, '0.0.0.0', () => {
-      server.off('error', onError);
-      resolve();
-    });
-  });
+  if (config.bridge.enabled) await bridgeQueue.init();
+  await fromMeStore.list();
   log('service_started', {
-    port: config.port,
-    statePath: config.statePath,
-    stateWritable: true,
-    shadow: config.shadowMode,
-    modelEnabled: config.model.enabled,
-    barkEnabled: config.bark.enabled,
-    ntfyEnabled: config.ntfy.enabled,
-    notificationProvider,
+    version: SYSTEM_VERSION, port: config.port, shadow: config.shadowMode,
+    stateWritable: true, statePath: config.statePath,
+    modelEnabled: config.model.enabled, barkEnabled: config.bark.enabled,
+    ntfyEnabled: config.ntfy.enabled, notificationProvider, bridgeEnabled: config.bridge.enabled,
   });
-
-  const timer = setInterval(
-    () => runCycle().catch((error) => log('cycle_failed', { message: error.message })),
-    config.settleIntervalMinutes * 60_000,
-  );
-  timer.unref();
-
-  for (const signal of ['SIGINT', 'SIGTERM']) {
-    process.on(signal, () => {
-      clearInterval(timer);
-      server.close(() => process.exit(0));
-    });
-  }
-}
-
-start().catch((error) => {
-  log('startup_failed', {
-    message: error.message,
-    statePath: config.statePath,
-    port: config.port,
-  });
-  process.exit(1);
 });
+
+const timer = setInterval(() => runCycle().catch((error) => log('cycle_failed', { message: error.message })), config.settleIntervalMinutes * 60_000);
+timer.unref();
+
+const bridgeTimer = setInterval(() => publishReadyBridgeDeliveries().catch((error) => log('bridge_publish_failed', { message: error.message })), config.bridge.pollSeconds * 1000);
+bridgeTimer.unref();
+
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => server.close(() => process.exit(0)));
+}

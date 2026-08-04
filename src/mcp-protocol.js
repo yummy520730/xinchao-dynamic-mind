@@ -10,6 +10,7 @@ const INTERACTION_TYPES = new Set([
   'conflict',
   'loss',
   'reconciliation',
+  'reassurance',
 ]);
 
 export const XINCHAO_TOOLS = [
@@ -93,12 +94,13 @@ export const XINCHAO_TOOLS = [
             'conflict',
             'loss',
             'reconciliation',
+            'reassurance',
           ],
           description: [
             '已完成互动的结果类型；仅由心潮服务端映射为受限欲望变化。',
             'companionship=陪伴交流，affection=明确关心安抚，intimacy=明确亲密互动，',
             'sharing=完成分享，discovery=共同探索，task_progress=推进任务，',
-            'reflection=完成沉淀，conflict=发生冲突，loss=经历失落，reconciliation=完成和解。',
+            'reflection=完成沉淀，conflict=发生冲突，loss=经历失落，reconciliation=完成和解，reassurance=回应不安或梦境。',
           ].join(''),
         },
         tone: {
@@ -170,6 +172,27 @@ export const XINCHAO_TOOLS = [
       idempotentHint: true,
       openWorldHint: false,
     },
+  },
+  {
+    name: 'xinchao_from_me',
+    title: '给用户留下一句话',
+    description: [
+      '仅当你独立产生了想留给用户的话、思念内容或行动结果时调用。',
+      '这不是用户代写入口；不要因为页面提示而虚构主动消息，也不要提交聊天原文。',
+      '相同 event_id 的重试不会重复保存。',
+    ].join(''),
+    inputSchema: {
+      type: 'object',
+      properties: {
+        event_id: { type: 'string', minLength: 8, maxLength: 120 },
+        kind: { type: 'string', enum: ['longing_content', 'action_result', 'pending_from_me'], default: 'pending_from_me' },
+        message: { type: 'string', minLength: 1, maxLength: 1200 },
+        ttl_hours: { type: 'integer', minimum: 1, maximum: 720, default: 168 },
+      },
+      required: ['event_id', 'message'],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
 ];
 
@@ -262,6 +285,15 @@ function handoffNoteArgs(args = {}, fallbackSessionId = '') {
   };
 }
 
+function fromMeArgs(args = {}) {
+  return {
+    eventId: String(args.event_id ?? '').trim().slice(0, 120),
+    kind: String(args.kind ?? 'pending_from_me').trim(),
+    message: String(args.message ?? '').replace(/\s+/g, ' ').trim().slice(0, 1200),
+    ttlHours: Math.max(1, Math.min(720, numberOr(args.ttl_hours, 168))),
+  };
+}
+
 async function callTool(name, args, handlers) {
   const fallbackSessionId = handlers.defaultSessionId ?? '';
   if (name === 'xinchao_context') {
@@ -290,6 +322,10 @@ async function callTool(name, args, handlers) {
       result,
     );
   }
+  if (name === 'xinchao_from_me') {
+    const result = await handlers.fromMe(fromMeArgs(args));
+    return toolText(`已留下主动消息：id=${result.id}${result.duplicate ? ' duplicate=true' : ''}`, result);
+  }
   throw new Error(`未知工具：${name}`);
 }
 
@@ -313,13 +349,14 @@ export async function handleMcpMessage(payload, handlers) {
         serverInfo: {
           name: 'xinchao-dynamic-mind',
           title: '心潮动态心智系统',
-          version: '2.3.2-lmc.2',
+          version: '2.4.0-lmc.1',
         },
         instructions: [
           '新窗口开始时调用 xinchao_context；服务端会绑定当前 MCP 连接，无需自行编写 session_id。',
           '一次实际互动后可调用 xinchao_event 更新窗口短状态；event_id 必须唯一，重试时复用。',
           '需要换窗续接时可调用 xinchao_handoff_note 保存近期进度摘要；不要提交聊天原文或人物基岩。',
           '只有结果明确的真实互动才填写 interaction_type；不要提交聊天正文或欲望数值。',
+          '只有你独立产生了想留给用户的话时才调用 xinchao_from_me；用户页面不能替你写。',
         ].join(''),
       }),
     };

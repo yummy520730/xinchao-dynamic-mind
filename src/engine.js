@@ -20,6 +20,7 @@ export const INTERACTION_TYPES = Object.freeze([
   'conflict',
   'loss',
   'reconciliation',
+  'reassurance',
 ]);
 
 const INTERACTION_EFFECTS = Object.freeze({
@@ -33,6 +34,7 @@ const INTERACTION_EFFECTS = Object.freeze({
   conflict: { increase: { anger: 0.07, grieve: 0.02 } },
   loss: { increase: { grieve: 0.08, monitor: 0.04 } },
   reconciliation: { relief: { anger: 0.30, grieve: 0.18, monitor: 0.04 } },
+  reassurance: { relief: { grieve: 0.20, anger: 0.08, monitor: 0.05 } },
 });
 
 function ensureStateShape(state) {
@@ -331,22 +333,18 @@ export function settleState(input, now = new Date(), sleepAfterMinutes = 90, opt
 
     const ceiling = clamp(Number(dim.ceiling ?? SATURATE_CEIL), 0.1, 1);
     const floor = Math.min(ceiling, clamp(Number(dim.saturationFloor ?? SATURATE_FLOOR)));
-
     let next;
     if (current > ceiling) {
-      // Migrate legacy states that had flattened at 0.80 without an abrupt
-      // reset. Each tick moves them toward the dimension-specific range.
       next = Math.max(ceiling, current - 0.12 * elapsedHours);
     } else {
       let rate = dim.growPerHour;
       if (isNight && dim.nightMul !== undefined) rate *= dim.nightMul;
       rate *= fatigueMultiplier;
       const headroom = Math.max(0, 1 - current / ceiling);
-      const growth = rate * headroom * elapsedHours;
       const sleepDecay = state.consciousness === 'sleeping'
         ? Number(dim.sleepDecayPerHour ?? 0.008) * Math.max(0, current - floor) * elapsedHours
         : 0;
-      next = clamp(current + growth - sleepDecay, 0, ceiling);
+      next = clamp(current + rate * headroom * elapsedHours - sleepDecay, 0, ceiling);
     }
 
     if (next !== current) changed = true;
@@ -413,12 +411,11 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
   }
   const wasSleeping = state.consciousness === 'sleeping';
   state.consciousness = 'awake';
-  // A genuine, non-duplicate conversation event is the authoritative last
-  // contact signal. This keeps idle notifications working even when the
-  // optional shared heartbeat file is not mounted. Duplicate retries return
-  // above, so they cannot keep extending the idle window.
-  state.lastHeartbeatAt = iso(now);
   state.lastConversationAt = iso(now);
+  // Any real conversation event is stronger evidence of presence than a
+  // content-free heartbeat. Keep the autonomous-contact idle gate aligned
+  // with both HTTP hooks and MCP interaction events.
+  state.lastHeartbeatAt = iso(now);
   state.lastSettledAt = iso(now);
   state.sleepStartedAt = null;
   state.thoughtPool ??= newThoughtPool();
@@ -444,9 +441,8 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
     }
     : applyInteractionOutcome(state, type, now, options);
 
-  // Conversation clients may report only a semantic event. Numeric drive
-  // deltas, self-selected satisfied drives and arbitrary thought text are
-  // intentionally ignored here; the service owns every state transition.
+  // Clients report semantic events only. Numeric deltas, self-selected
+  // satisfaction and arbitrary thought text are intentionally ignored.
 
   recordConversationEventFingerprint(state, eventId, type, now);
   state.revision += 1;
@@ -535,7 +531,8 @@ export function applyDriveFeedback(input, feedback = {}, now = new Date()) {
   const state = ensureStateShape(structuredClone(input));
   for (const [key, delta] of Object.entries(feedback)) {
     if (DRIVE_KEYS.includes(key) && Number.isFinite(Number(delta))) {
-      state.drives[key] = Number(clamp(Number(state.drives[key]) + Number(delta)).toFixed(4));
+      const ceiling = clamp(Number(DIMENSIONS[key].ceiling ?? SATURATE_CEIL), 0.1, 1);
+      state.drives[key] = Number(clamp(Number(state.drives[key]) + Number(delta), 0, ceiling).toFixed(4));
     }
   }
   state.lastSettledAt = iso(now);
@@ -567,8 +564,7 @@ export function topDrives(state, limit = 5) {
 
 export function recordDream(input, dream) {
   const state = ensureStateShape(structuredClone(input));
-  const fingerprint = dreamFingerprint(dream);
-  dream.fingerprint = fingerprint || dream.fingerprint || null;
+  dream.fingerprint = dreamFingerprint(dream) || dream.fingerprint || null;
   state.recentDreams.push(dream);
   state.recentDreams = state.recentDreams.slice(-MAX_RECENT_DREAMS);
   const day = dream.createdAt.slice(0, 10);
@@ -580,19 +576,13 @@ export function recordDream(input, dream) {
 }
 
 function normalizeDreamText(value) {
-  return String(value ?? '')
-    .normalize('NFKC')
-    .toLowerCase()
-    .replace(/[\p{P}\p{S}\s]+/gu, '');
+  return String(value ?? '').normalize('NFKC').toLowerCase().replace(/[\p{P}\p{S}\s]+/gu, '');
 }
 
 function dreamNgrams(value, size = 2) {
   const chars = Array.from(value);
   if (chars.length < size) return chars.length ? [chars.join('')] : [];
-  return Array.from(
-    { length: chars.length - size + 1 },
-    (_, index) => chars.slice(index, index + size).join(''),
-  );
+  return Array.from({ length: chars.length - size + 1 }, (_, index) => chars.slice(index, index + size).join(''));
 }
 
 function dreamText(dream) {
@@ -601,24 +591,14 @@ function dreamText(dream) {
 
 export function dreamFingerprint(dream) {
   const normalized = normalizeDreamText(dreamText(dream));
-  return normalized
-    ? createHash('sha256').update(normalized, 'utf8').digest('hex').slice(0, 24)
-    : '';
+  return normalized ? createHash('sha256').update(normalized, 'utf8').digest('hex').slice(0, 24) : '';
 }
 
 export function dreamMaterialFingerprint(material, topDriveItems = []) {
-  const normalized = normalizeDreamText([
-    String(material ?? ''),
-    JSON.stringify(
-      (Array.isArray(topDriveItems) ? topDriveItems : []).map((item) => [
-        item?.key,
-        Number(item?.value ?? 0).toFixed(2),
-      ]),
-    ),
-  ].join('\n'));
-  return normalized
-    ? createHash('sha256').update(normalized, 'utf8').digest('hex').slice(0, 24)
-    : '';
+  const normalized = normalizeDreamText([String(material ?? ''), JSON.stringify(
+    (Array.isArray(topDriveItems) ? topDriveItems : []).map((item) => [item?.key, Number(item?.value ?? 0).toFixed(2)]),
+  )].join('\n'));
+  return normalized ? createHash('sha256').update(normalized, 'utf8').digest('hex').slice(0, 24) : '';
 }
 
 export function dreamSimilarity(left, right) {
@@ -633,10 +613,7 @@ export function dreamSimilarity(left, right) {
   let overlap = 0;
   for (const gram of bGrams) {
     const count = Number(remaining.get(gram) ?? 0);
-    if (count > 0) {
-      overlap += 1;
-      remaining.set(gram, count - 1);
-    }
+    if (count > 0) { overlap += 1; remaining.set(gram, count - 1); }
   }
   const dice = (2 * overlap) / (aGrams.length + bGrams.length);
   const containment = overlap / Math.min(aGrams.length, bGrams.length);
@@ -645,25 +622,14 @@ export function dreamSimilarity(left, right) {
 
 export function dreamDuplicateCheck(dream, state, threshold = 0.62) {
   const fingerprint = dreamFingerprint(dream);
-  const recent = (state?.recentDreams ?? []).slice(-MAX_RECENT_DREAMS);
   let similarity = 0;
   let matchedDreamId = null;
-  for (const existing of recent) {
-    const existingFingerprint = existing?.fingerprint || dreamFingerprint(existing);
-    const score = fingerprint && fingerprint === existingFingerprint
-      ? 1
-      : dreamSimilarity(dream, existing);
-    if (score > similarity) {
-      similarity = score;
-      matchedDreamId = existing?.id ?? null;
-    }
+  for (const existing of (state?.recentDreams ?? []).slice(-MAX_RECENT_DREAMS)) {
+    const score = fingerprint && fingerprint === (existing?.fingerprint || dreamFingerprint(existing))
+      ? 1 : dreamSimilarity(dream, existing);
+    if (score > similarity) { similarity = score; matchedDreamId = existing?.id ?? null; }
   }
-  return {
-    duplicate: similarity >= threshold,
-    fingerprint,
-    similarity,
-    matchedDreamId,
-  };
+  return { duplicate: similarity >= threshold, fingerprint, similarity, matchedDreamId };
 }
 
 export function recordDreamAttempt(input, now = new Date(), materialFingerprint = null) {
@@ -774,9 +740,7 @@ export function dreamAllowed(state, now, minIntervalHours, maxPerDay) {
   const latest = state.recentDreams.at(-1);
   const latestAt = Math.max(
     Number.isFinite(Date.parse(latest?.createdAt ?? '')) ? Date.parse(latest.createdAt) : 0,
-    Number.isFinite(Date.parse(state.lastDreamAttemptAt ?? ''))
-      ? Date.parse(state.lastDreamAttemptAt)
-      : 0,
+    Number.isFinite(Date.parse(state.lastDreamAttemptAt ?? '')) ? Date.parse(state.lastDreamAttemptAt) : 0,
   );
   if (!latestAt) return true;
   return now.getTime() - latestAt >= minIntervalHours * 3_600_000;

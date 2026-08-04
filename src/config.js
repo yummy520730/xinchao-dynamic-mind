@@ -12,11 +12,12 @@ function number(name, fallback, min, max) {
 export function loadConfig() {
   const agentName = process.env.AGENT_NAME ?? '心潮';
   const notificationRecipient = process.env.NOTIFICATION_RECIPIENT ?? '用户';
+  const statePath = process.env.STATE_PATH ?? '/app/state/state.json';
   return {
     identity: { agentName, notificationRecipient },
     port: number('PORT', 18110, 1, 65535),
     serviceToken: process.env.SERVICE_TOKEN ?? '',
-    statePath: process.env.STATE_PATH ?? '/app/state/state.json',
+    statePath,
     journalPath: process.env.TRANSITION_JOURNAL_PATH ?? '/app/state/transitions.jsonl',
     settleIntervalMinutes: number('SETTLE_INTERVAL_MINUTES', 15, 1, 1440),
     sleepAfterMinutes: number('SLEEP_AFTER_MINUTES', 90, 5, 10080),
@@ -41,28 +42,14 @@ export function loadConfig() {
       transport: process.env.MEMORY_TRANSPORT ?? 'lmc5_bridge',
       url: process.env.MEMORY_MCP_URL ?? process.env.OMBRE_MCP_URL ?? '',
       token: process.env.MEMORY_MCP_TOKEN ?? process.env.OMBRE_MCP_TOKEN ?? '',
-      bridgeUrl: (
-        process.env.MEMORY_BRIDGE_URL
-        ?? process.env.OMBRE_BRIDGE_URL
-        ?? ''
-      ).replace(/\/$/, ''),
+      bridgeUrl: (process.env.MEMORY_BRIDGE_URL ?? process.env.OMBRE_BRIDGE_URL ?? '').replace(/\/$/, ''),
       bridgeToken: process.env.MEMORY_BRIDGE_TOKEN ?? process.env.OMBRE_BRIDGE_TOKEN ?? '',
       readEnabled: bool('MEMORY_READ_ENABLED', bool('OMBRE_READ_ENABLED', false)),
       writeEnabled: bool('MEMORY_WRITE_ENABLED', bool('OMBRE_WRITE_ENABLED', false)),
       readTool: process.env.MEMORY_READ_TOOL ?? 'breath',
       writeTool: process.env.MEMORY_WRITE_TOOL ?? 'hold',
-      breathMaxResults: number(
-        'MEMORY_BREATH_MAX_RESULTS',
-        number('OMBRE_BREATH_MAX_RESULTS', 3, 1, 10),
-        1,
-        10,
-      ),
-      breathMaxTokens: number(
-        'MEMORY_BREATH_MAX_TOKENS',
-        number('OMBRE_BREATH_MAX_TOKENS', 800, 200, 3000),
-        200,
-        3000,
-      ),
+      breathMaxResults: number('MEMORY_BREATH_MAX_RESULTS', number('OMBRE_BREATH_MAX_RESULTS', 3, 1, 10), 1, 10),
+      breathMaxTokens: number('MEMORY_BREATH_MAX_TOKENS', number('OMBRE_BREATH_MAX_TOKENS', 800, 200, 3000), 200, 3000)
     },
     context: {
       enabled: bool('CONTEXT_ENVELOPE_ENABLED', true),
@@ -87,14 +74,33 @@ export function loadConfig() {
       accessTtlSeconds: number('OAUTH_ACCESS_TTL_SECONDS', 86400, 300, 2592000),
       refreshTtlSeconds: number('OAUTH_REFRESH_TTL_SECONDS', 31536000, 86400, 63072000),
     },
+    dashboard: {
+      enabled: bool('DASHBOARD_ENABLED', false),
+      publicBaseUrl: (process.env.DASHBOARD_PUBLIC_BASE_URL ?? process.env.OAUTH_PUBLIC_BASE_URL ?? '').replace(/\/$/, ''),
+      accessToken: process.env.DASHBOARD_ACCESS_TOKEN ?? '',
+      sessionTtlSeconds: number('DASHBOARD_SESSION_TTL_SECONDS', 43200, 900, 604800),
+      includePrivateText: bool('DASHBOARD_INCLUDE_PRIVATE_TEXT', false),
+      dreamLimit: number('DASHBOARD_DREAM_LIMIT', 12, 1, 30),
+    },
     interaction: {
       maxEffectsPerDay: number('INTERACTION_MAX_EFFECTS_PER_DAY', 24, 1, 96),
       timeZone: process.env.INTERACTION_TIME_ZONE ?? process.env.SETTLE_TIME_ZONE ?? 'Asia/Shanghai',
     },
+    bridge: {
+      enabled: bool('BRIDGE_ENABLED', false),
+      machineToken: process.env.BRIDGE_MACHINE_TOKEN ?? '',
+      statePath: process.env.BRIDGE_STATE_PATH ?? '/app/state/bridge-queue.json',
+      maxEntries: number('BRIDGE_MAX_ENTRIES', 500, 10, 5000),
+      ttlHours: number('BRIDGE_TTL_HOURS', 168, 1, 720),
+      pollSeconds: number('BRIDGE_POLL_SECONDS', 15, 2, 300),
+    },
+    fromMe: {
+      statePath: process.env.AI_OUTBOX_PATH ?? statePath.replace(/[^/]+$/, 'from-me.json'),
+      maxEntries: number('AI_OUTBOX_MAX_ENTRIES', 100, 10, 1000),
+      ttlHours: number('AI_OUTBOX_TTL_HOURS', 168, 1, 720),
+    },
     heartbeat: {
-      filePath: process.env.MEMORY_HEARTBEAT_FILE
-        ?? process.env.OMBRE_HEARTBEAT_FILE
-        ?? '/memory-data/heartbeat.json',
+      filePath: process.env.MEMORY_HEARTBEAT_FILE ?? process.env.OMBRE_HEARTBEAT_FILE ?? '/memory-data/heartbeat.json',
       // Dream residue may be shared after a shorter quiet period. Autonomous
       // contact stays on the stricter, long-absence threshold below.
       dreamMinIdleHours: number('BARK_DREAM_MIN_CONTACT_IDLE_HOURS', 3, 1, 24),
@@ -120,10 +126,7 @@ export function loadConfig() {
       topic: process.env.NTFY_TOPIC ?? '',
       token: process.env.NTFY_TOKEN ?? '',
       title: process.env.NTFY_TITLE ?? agentName,
-      tags: (process.env.NTFY_TAGS ?? 'thought_balloon')
-        .split(',')
-        .map((item) => item.trim())
-        .filter(Boolean),
+      tags: (process.env.NTFY_TAGS ?? 'thought_balloon').split(',').map((item) => item.trim()).filter(Boolean),
       priority: number('NTFY_PRIORITY', 4, 1, 5),
     },
     settle: {
@@ -141,4 +144,53 @@ export function loadConfig() {
       maxPerDay: number('DAYTIME_MAX_PER_DAY', 7, 1, 24)
     }
   };
+}
+
+export function validateConfig(config) {
+  const externalMemoryEnabled = Boolean(
+    config.ombre.readEnabled
+    || config.ombre.writeEnabled
+    || config.context.ombreEnabled
+  );
+  if (externalMemoryEnabled) {
+    const bridgeMode = config.ombre.transport === 'lmc5_bridge';
+    if (!String(bridgeMode ? config.ombre.bridgeUrl : config.ombre.url || '').trim()) {
+      throw new Error(
+        `${bridgeMode ? 'MEMORY_BRIDGE_URL' : 'OMBRE_MCP_URL'} is required when external memory integration is enabled`
+      );
+    }
+    if (!String(bridgeMode ? config.ombre.bridgeToken : config.ombre.token || '').trim()) {
+      throw new Error(
+        `${bridgeMode ? 'MEMORY_BRIDGE_TOKEN' : 'OMBRE_MCP_TOKEN'} is required when external memory integration is enabled`
+      );
+    }
+  }
+  if (config.dashboard?.enabled) {
+    const accessToken = String(config.dashboard.accessToken || '');
+    if (accessToken.length < 32) {
+      throw new Error('DASHBOARD_ACCESS_TOKEN must contain at least 32 characters when Dashboard is enabled');
+    }
+    if (accessToken === String(config.serviceToken || '')) {
+      throw new Error('DASHBOARD_ACCESS_TOKEN must be different from SERVICE_TOKEN');
+    }
+    const publicBaseUrl = String(config.dashboard.publicBaseUrl || '');
+    if (!publicBaseUrl) {
+      throw new Error('DASHBOARD_PUBLIC_BASE_URL is required when Dashboard is enabled');
+    }
+    let parsed;
+    try { parsed = new URL(publicBaseUrl); }
+    catch { throw new Error('DASHBOARD_PUBLIC_BASE_URL must be a valid URL'); }
+    const local = ['localhost', '127.0.0.1', '::1'].includes(parsed.hostname);
+    if (parsed.protocol !== 'https:' && !(local && parsed.protocol === 'http:')) {
+      throw new Error('DASHBOARD_PUBLIC_BASE_URL must use HTTPS outside localhost');
+    }
+  }
+  if (config.bridge?.enabled) {
+    const token = String(config.bridge.machineToken || '');
+    if (token.length < 32) throw new Error('BRIDGE_MACHINE_TOKEN must contain at least 32 characters when Bridge is enabled');
+    if ([config.serviceToken, config.dashboard?.accessToken].filter(Boolean).includes(token)) {
+      throw new Error('BRIDGE_MACHINE_TOKEN must be independent from service and dashboard tokens');
+    }
+  }
+  return config;
 }
