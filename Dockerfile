@@ -4,6 +4,7 @@ WORKDIR /app
 RUN apk add --no-cache su-exec
 COPY package.json ./
 COPY src ./src
+COPY packages ./packages
 COPY configs ./configs
 COPY docker-entrypoint.sh /usr/local/bin/xinchao-entrypoint
 RUN chmod 0755 /usr/local/bin/xinchao-entrypoint \
