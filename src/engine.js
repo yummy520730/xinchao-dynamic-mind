@@ -44,6 +44,11 @@ function ensureStateShape(state) {
   state.recentConversationEvents = Array.isArray(state.recentConversationEvents)
     ? state.recentConversationEvents.slice(-MAX_RECENT_CONVERSATION_EVENTS)
     : [];
+  if (previousSchemaVersion < 10) {
+    state.recentConversationEvents = state.recentConversationEvents.filter(
+      (item) => INTERACTION_TYPES.includes(String(item?.interactionType ?? '').trim().toLowerCase()),
+    );
+  }
   state.interactionUsage ??= {};
   state.handoffNotes = Array.isArray(state.handoffNotes) ? state.handoffNotes : [];
   state.lastDreamAttemptAt ??= null;
@@ -52,7 +57,7 @@ function ensureStateShape(state) {
   if (previousSchemaVersion < 9) {
     state.recentDreams = collapseDuplicateDreamHistory(state.recentDreams);
   }
-  state.schemaVersion = Math.max(9, previousSchemaVersion);
+  state.schemaVersion = Math.max(10, previousSchemaVersion);
   return state;
 }
 
@@ -198,7 +203,7 @@ function applySessionOverlay(state, event, now) {
 export function newState(now = new Date()) {
   const at = iso(now);
   return {
-    schemaVersion: 9,
+    schemaVersion: 10,
     revision: 0,
     consciousness: 'awake',
     lastConversationAt: at,
@@ -449,7 +454,10 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
   // Clients report semantic events only. Numeric deltas, self-selected
   // satisfaction and arbitrary thought text are intentionally ignored.
 
-  recordConversationEventFingerprint(state, eventId, type, now);
+  // Presence-only heartbeats are not semantic interactions. Keeping them out
+  // of this history prevents a healthy recall heartbeat from looking like a
+  // broken interaction with interactionType=null.
+  if (type) recordConversationEventFingerprint(state, eventId, type, now);
   state.revision += 1;
   return {
     state,

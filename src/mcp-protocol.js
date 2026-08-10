@@ -63,7 +63,7 @@ export const XINCHAO_TOOLS = [
     description: [
       '回传一次明确的人机互动，并更新当前窗口短状态。',
       '它会先结算事件发生前的时间增长，再唤醒心潮；可用受限互动类型触发服务端固定的欲望反馈。',
-      '只有真实完成且结果明确的互动才填写 interaction_type，不确定时省略。',
+      '只在真实完成且结果明确的互动后调用；interaction_type 必须填写，不确定时不要调用本工具。',
       '不要提交聊天正文；客户端不能直接填写欲望数值，也不会修改 OB 长期记忆。',
     ].join(''),
     inputSchema: {
@@ -118,7 +118,7 @@ export const XINCHAO_TOOLS = [
           default: 240,
         },
       },
-      required: ['event_id'],
+      required: ['event_id', 'interaction_type'],
       additionalProperties: false,
     },
     annotations: {
@@ -254,7 +254,8 @@ function eventArgs(args = {}, fallbackSessionId = '') {
   const eventId = String(args.event_id ?? '').trim().slice(0, 120);
   if (!eventId) throw new Error('event_id 是必填项，用于避免重复结算');
   const interactionType = String(args.interaction_type ?? '').trim().toLowerCase();
-  if (interactionType && !INTERACTION_TYPES.has(interactionType)) {
+  if (!interactionType) throw new Error('interaction_type 是必填项');
+  if (!INTERACTION_TYPES.has(interactionType)) {
     throw new Error('interaction_type 不在允许范围内');
   }
   const sessionState = {};
@@ -349,13 +350,13 @@ export async function handleMcpMessage(payload, handlers) {
         serverInfo: {
           name: 'xinchao-dynamic-mind',
           title: '心潮动态心智系统',
-          version: '2.4.0-lmc.2',
+          version: '2.4.0-lmc.3',
         },
         instructions: [
           '新窗口开始时调用 xinchao_context；服务端会绑定当前 MCP 连接，无需自行编写 session_id。',
           '一次实际互动后可调用 xinchao_event 更新窗口短状态；event_id 必须唯一，重试时复用。',
           '需要换窗续接时可调用 xinchao_handoff_note 保存近期进度摘要；不要提交聊天原文或人物基岩。',
-          '只有结果明确的真实互动才填写 interaction_type；不要提交聊天正文或欲望数值。',
+          '只有结果明确的真实互动才调用，且必须填写 interaction_type；不要提交聊天正文或欲望数值。',
           '只有你独立产生了想留给用户的话时才调用 xinchao_from_me；用户页面不能替你写。',
         ].join(''),
       }),
