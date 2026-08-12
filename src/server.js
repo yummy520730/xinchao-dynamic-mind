@@ -615,6 +615,7 @@ async function recordConversationEvent(event, source = 'api', now = new Date()) 
         && source !== 'heartbeat'
         && Boolean(event.interactionType ?? event.interaction_type),
       arrivalGapMinutes: config.anticipation.arrivalGapMinutes,
+      presenceOnly: source === 'heartbeat',
     });
     Object.assign(auditDetails, {
       changed: applied.changed,
