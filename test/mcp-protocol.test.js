@@ -42,7 +42,7 @@ test('MCP initialize advertises the 2.4.0 tool server', async () => {
   assert.equal(result.status, 200);
   assert.equal(result.body.result.protocolVersion, '2025-06-18');
   assert.equal(result.body.result.serverInfo.name, 'xinchao-dynamic-mind');
-  assert.equal(result.body.result.serverInfo.version, '2.4.0-lmc.1');
+  assert.equal(result.body.result.serverInfo.version, '2.5.12-lmc.1');
   assert.equal(result.body.result.capabilities.tools.listChanged, false);
 });
 
