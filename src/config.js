@@ -142,6 +142,26 @@ export function loadConfig() {
       minIntervalHours: number('DAYTIME_MIN_INTERVAL_HOURS', 2, 0.25, 24),
       maxIntervalHours: number('DAYTIME_MAX_INTERVAL_HOURS', 3, 0.25, 24),
       maxPerDay: number('DAYTIME_MAX_PER_DAY', 7, 1, 24)
+    },
+    reflux: {
+      enabled: bool('OUTPUT_REFLUX_ENABLED', true),
+      amount: number('OUTPUT_REFLUX_AMOUNT', 0.30, 0.05, 0.6),
+    },
+    resonance: {
+      enabled: bool('MEMORY_RESONANCE_ENABLED', true),
+      nudge: number('MEMORY_RESONANCE_NUDGE', 0.02, 0.005, 0.1),
+      perCallCap: number('MEMORY_RESONANCE_PER_CALL_CAP', 0.06, 0.01, 0.3),
+    },
+    anticipation: {
+      enabled: bool('ANTICIPATION_ENABLED', true),
+      arrivalGapMinutes: number('ANTICIPATION_ARRIVAL_GAP_MINUTES', 90, 15, 720),
+    },
+    longing: {
+      enabled: bool('LONGING_ENABLED', true),
+      nudge: number('LONGING_NUDGE', 0.02, 0.005, 0.1),
+      cap: number('LONGING_CAP', 0.04, 0.01, 0.2),
+      onsetHours: number('LONGING_ONSET_HOURS', 6, 1, 48),
+      fullHours: number('LONGING_FULL_HOURS', 18, 2, 96),
     }
   };
 }

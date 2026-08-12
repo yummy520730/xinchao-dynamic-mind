@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { loadConfig, validateConfig } from './config.js';
-import { INTERACTION_TYPES, applyDriveFeedback, applyOmbreHeartbeat, barkAllowed, breathDreamContext, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, dreamDuplicateCheck, dreamMaterialFingerprint, newState, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, recordDreamAttempt, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleState, topDrives } from './engine.js';
+import { INTERACTION_TYPES, applyDriveFeedback, applyLongingNudge, applyMemoryResonance, applyOmbreHeartbeat, applyOutputReflux, barkAllowed, breathDreamContext, computeLonging, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, dreamDuplicateCheck, dreamMaterialFingerprint, newState, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, recordDreamAttempt, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleState, topDrives } from './engine.js';
 import { selectUniqueBark } from './bark-dedupe.js';
 import { StateStore } from './state-store.js';
 import { ModelClient } from './model-client.js';
@@ -47,7 +47,7 @@ const fromMeStore = new FromMeStore(config.fromMe.statePath, config.fromMe);
 const bridgeStreams = new Set();
 await oauth.init();
 let cyclePromise = null;
-const SYSTEM_VERSION = '2.4.0-lmc.3';
+const SYSTEM_VERSION = '2.5.12-lmc.1';
 
 function log(event, fields = {}) {
   console.log(JSON.stringify({ at: new Date().toISOString(), event, ...fields }));
@@ -121,6 +121,20 @@ async function runCycle() {
     let dreamCreated = false;
     let barkSent = false;
     let daytimeSent = false;
+    if (config.longing.enabled) {
+      const longing = computeLonging(state, now, {
+        timeZone: config.settle.timeZone,
+        ...config.longing,
+      });
+      const preview = applyLongingNudge(state, longing, now, config.longing);
+      if (preview.changed) {
+        state = await updateState({
+          type: 'longing_nudge', source: 'rhythm', at: now,
+          details: { longing, applied: preview.applied },
+        }, (latest) => applyLongingNudge(latest, longing, now, config.longing).state);
+        log('longing_nudge', { longing, applied: preview.applied, revision: state.revision });
+      }
+    }
     // Dream residue follows a short quiet period; autonomous contact remains
     // reserved for a genuine long absence.
     const dreamContactIsIdle = contactIdleAllowed(state, now, config.heartbeat.dreamMinIdleHours);
@@ -128,9 +142,25 @@ async function runCycle() {
 
     if (dreamAllowed(state, now, config.dreamMinIntervalHours, config.dreamMaxPerDay)) {
       let material = '';
+      let materialSignals = [];
       if (!config.shadowMode && config.ombre.readEnabled) {
-        try { material = await ombre.recentMaterial(); }
+        try {
+          const bundle = await ombre.recentMaterialBundle(topDrives(state));
+          material = bundle.text;
+          materialSignals = bundle.signals;
+        }
         catch (error) { log('ombre_read_failed', { message: error.message }); }
+      }
+
+      if (config.resonance.enabled && materialSignals.length) {
+        const preview = applyMemoryResonance(state, materialSignals, now, config.resonance);
+        if (preview.changed) {
+          state = await updateState({
+            type: 'memory_resonance', source: 'lmc5_metadata', at: now,
+            details: { kind: 'dream', signals: materialSignals.join(',') },
+          }, (latest) => applyMemoryResonance(latest, materialSignals, now, config.resonance).state);
+          log('memory_resonance', { kind: 'dream', signals: materialSignals.length, revision: state.revision });
+        }
       }
 
       const currentTopDrives = topDrives(state);
@@ -220,6 +250,15 @@ async function runCycle() {
               }, (latest) => recordBark(latest, now, { kind: 'dream', message: selected.message }));
               barkSent = true;
               log('bark_sent', { kind: 'dream', revision: state.revision });
+              if (config.reflux.enabled) {
+                const expressed = topDrives(state, 1)[0];
+                if (expressed) {
+                  state = await updateState({
+                    type: 'output_reflux', source: notificationProvider, at: now,
+                    details: { kind: 'dream', drive: expressed.key },
+                  }, (latest) => applyOutputReflux(latest, expressed.key, selected.message, now, config.reflux.amount).state);
+                }
+              }
             }
           }
         } catch (error) { log('bark_failed', { kind: 'dream', message: error.message }); }
@@ -263,6 +302,15 @@ async function runCycle() {
             }, (latest) => recordBark(latest, now, { kind: 'autonomous_thought', message: selected.message }));
             barkSent = true;
             log('bark_sent', { kind: 'autonomous_thought', source: selected.candidate?.source, revision: state.revision });
+            if (config.reflux.enabled) {
+              const expressed = topDrives(state, 1)[0];
+              if (expressed) {
+                state = await updateState({
+                  type: 'output_reflux', source: notificationProvider, at: now,
+                  details: { kind: 'autonomous_thought', drive: expressed.key },
+                }, (latest) => applyOutputReflux(latest, expressed.key, selected.message, now, config.reflux.amount).state);
+              }
+            }
           }
         } catch (error) { log('bark_failed', { kind: 'autonomous_thought', message: error.message }); }
       }
@@ -278,7 +326,17 @@ async function runCycle() {
     } else if (!config.shadowMode && config.daytime.enabled && config.ombre.readEnabled && notificationEnabled && daytimeEmergenceAllowed(state, now, config.daytime)) {
       let selected = { message: '', candidate: { source: 'none' }, reason: 'empty', attempts: 1 };
       try {
-        const material = await ombre.daytimeMaterial();
+        const bundle = await ombre.daytimeMaterialBundle(topDrives(state));
+        const material = bundle.text;
+        if (config.resonance.enabled && bundle.signals.length) {
+          const preview = applyMemoryResonance(state, bundle.signals, now, config.resonance);
+          if (preview.changed) {
+            state = await updateState({
+              type: 'memory_resonance', source: 'lmc5_metadata', at: now,
+              details: { kind: 'daytime_emergence', signals: bundle.signals.join(',') },
+            }, (latest) => applyMemoryResonance(latest, bundle.signals, now, config.resonance).state);
+          }
+        }
         if (material.trim()) {
           selected = await selectUniqueBark({
             state,
@@ -304,6 +362,15 @@ async function runCycle() {
             }, (latest) => recordDaytimeEmergence(latest, selected.message, now, config.daytime.timeZone));
             daytimeSent = true;
             log('bark_sent', { kind: 'daytime_emergence', source: selected.candidate?.source, revision: state.revision });
+            if (config.reflux.enabled) {
+              const expressed = topDrives(state, 1)[0];
+              if (expressed) {
+                state = await updateState({
+                  type: 'output_reflux', source: notificationProvider, at: now,
+                  details: { kind: 'daytime_emergence', drive: expressed.key },
+                }, (latest) => applyOutputReflux(latest, expressed.key, selected.message, now, config.reflux.amount).state);
+              }
+            }
           }
         } catch (error) {
           log('bark_failed', { kind: 'daytime_emergence', message: error.message });
@@ -485,6 +552,7 @@ async function createContextEnvelope({
     ombreText,
     maxTokens,
     ttlMinutes: config.context.ttlMinutes,
+    timeZone: config.settle.timeZone,
     now,
     alreadyDelivered: delivery.alreadyDelivered,
     force,
@@ -543,6 +611,10 @@ async function recordConversationEvent(event, source = 'api', now = new Date()) 
       sleepAfterMinutes: config.sleepAfterMinutes,
       settle: config.settle,
       interaction: config.interaction,
+      recordArrival: config.anticipation.enabled
+        && source !== 'heartbeat'
+        && Boolean(event.interactionType ?? event.interaction_type),
+      arrivalGapMinutes: config.anticipation.arrivalGapMinutes,
     });
     Object.assign(auditDetails, {
       changed: applied.changed,

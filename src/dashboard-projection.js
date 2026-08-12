@@ -1,4 +1,5 @@
 import { DIMENSIONS, DRIVE_KEYS } from './dimensions.js';
+import { computeAnticipation, computeLonging } from './engine.js';
 
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, Number(value) || 0));
 
@@ -116,6 +117,13 @@ export function buildDashboardSnapshot(state = {}, config = {}, now = new Date()
     },
     drives,
     topDrives,
+    rhythm: {
+      learnedSamples: Number((Array.isArray(state.arrivalHistogram)
+        ? state.arrivalHistogram.reduce((sum, value) => sum + (Number(value) || 0), 0)
+        : 0).toFixed(2)),
+      anticipation: computeAnticipation(state, generatedAt, { timeZone: config.settle?.timeZone }),
+      longing: computeLonging(state, generatedAt, { timeZone: config.settle?.timeZone }),
+    },
     thoughts: projectedThoughts(state),
     dreams: projectedDreams(
       state,

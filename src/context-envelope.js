@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { breathDreamContext, topDrives } from './engine.js';
+import { breathDreamContext, computeAnticipation, computeLonging, topDrives } from './engine.js';
 import { renderHandoffNotes } from './handoff-notes.js';
 
 const VALID_MODES = new Set(['session_start', 'turn', 'inspect']);
@@ -75,7 +75,7 @@ function thoughtSignals(state) {
   };
 }
 
-function dynamicSection(state, sessionId, now) {
+function dynamicSection(state, sessionId, now, timeZone = 'Asia/Shanghai') {
   return {
     consciousness: state.consciousness,
     fatigue: Number(Number(state.fatigue ?? 0).toFixed(3)),
@@ -84,6 +84,8 @@ function dynamicSection(state, sessionId, now) {
       label: drive.label,
       value: Number(Number(drive.value).toFixed(3)),
     })),
+    anticipation: computeAnticipation(state, now, { timeZone }),
+    longing: computeLonging(state, now, { timeZone }),
     thoughts: thoughtSignals(state),
     session: sessionOverlay(state, sessionId, now),
   };
@@ -98,6 +100,10 @@ function renderDynamic(value) {
     `疲劳=${value.fatigue.toFixed(3)}`,
     drives ? `当前驱力：${drives}` : '',
   ].filter(Boolean);
+  if (value.longing >= 0.6) parts.push(`挂念：有点想她了（${value.longing.toFixed(2)}）`);
+  else if (value.longing >= 0.35) parts.push(`挂念：惦记着她（${value.longing.toFixed(2)}）`);
+  else if (value.anticipation >= 0.6) parts.push(`期待：她通常这个点前后会来（${value.anticipation.toFixed(2)}）`);
+  else if (value.anticipation >= 0.3) parts.push(`期待：她大概快来了（${value.anticipation.toFixed(2)}）`);
   if (value.session) {
     parts.push(
       `窗口短态：tone=${value.session.tone} warmth=${value.session.warmth.toFixed(3)} `
@@ -167,6 +173,7 @@ export function buildContextEnvelope({
   ombreText = '',
   maxTokens = 2200,
   ttlMinutes = 15,
+  timeZone = 'Asia/Shanghai',
   now = new Date(),
   alreadyDelivered = false,
   force = false,
@@ -193,7 +200,7 @@ export function buildContextEnvelope({
     };
   }
 
-  const dynamic = dynamicSection(state, safeSessionId, generatedAt);
+  const dynamic = dynamicSection(state, safeSessionId, generatedAt, timeZone);
   const sections = [
     {
       id: 'dynamic_state',
@@ -216,7 +223,7 @@ export function buildContextEnvelope({
   if (continuity) {
     sections.push({
       id: 'recent_continuity',
-      source: 'ombre-brain',
+      source: 'lmc5',
       ttl: 'session-start',
       content: continuity,
     });

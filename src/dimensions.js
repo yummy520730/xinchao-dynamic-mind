@@ -96,3 +96,22 @@ export const DIMENSIONS = Object.freeze({
 });
 
 export const DRIVE_KEYS = Object.freeze(Object.keys(DIMENSIONS));
+
+// LMC metadata affinity.  Resonance is driven by category/thread metadata,
+// never by treating recalled prose as a fresh conversation event.
+export const MEMORY_AFFINITY = Object.freeze({
+  relationship: { possess: 0.85, monitor: 0.80, crave: 0.65, share: 0.55 },
+  relationship_state: { possess: 0.85, monitor: 0.80, crave: 0.60 },
+  relationship_moment: { possess: 0.85, crave: 0.75, share: 0.60 },
+  fragments: { reflection: 0.65, share: 0.55, monitor: 0.55 },
+  episode: { reflection: 0.60, share: 0.55, curiosity: 0.50 },
+  diary: { reflection: 0.75, share: 0.55 },
+  tasks: { duty: 0.90, monitor: 0.50 },
+  projects: { duty: 0.85, curiosity: 0.55 },
+  worklog: { duty: 0.80, curiosity: 0.55 },
+  knowledge: { curiosity: 0.90, share: 0.55 },
+  health: { monitor: 0.80, duty: 0.55 },
+  legal: { duty: 0.75, monitor: 0.65 },
+  identity: { reflection: 0.75, possess: 0.50 },
+  reflection: { reflection: 0.90, share: 0.50 },
+});

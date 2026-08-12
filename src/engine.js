@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { DIMENSIONS, DRIVE_KEYS, SATURATE_CEIL, SATURATE_FLOOR } from './dimensions.js';
-import { newThoughtPool, tickThoughtPool, obsessionBonus } from './thought-pool.js';
+import { DIMENSIONS, DRIVE_KEYS, MEMORY_AFFINITY, SATURATE_CEIL, SATURATE_FLOOR } from './dimensions.js';
+import { newThoughtPool, tickThoughtPool, obsessionBonus, reinforceThought } from './thought-pool.js';
 
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
 const iso = (value) => new Date(value).toISOString();
@@ -8,6 +8,8 @@ const SESSION_TONES = new Set(['neutral', 'calm', 'warm', 'guarded', 'conflicted
 const SESSION_FIELDS = ['warmth', 'tension', 'attention', 'confidence'];
 const MAX_RECENT_CONVERSATION_EVENTS = 256;
 const MAX_RECENT_DREAMS = 20;
+const ARRIVAL_DECAY = 0.99;
+const RESONANCE_MIN_AFFINITY = 0.5;
 
 export const INTERACTION_TYPES = Object.freeze([
   'companionship',
@@ -51,13 +53,16 @@ function ensureStateShape(state) {
   }
   state.interactionUsage ??= {};
   state.handoffNotes = Array.isArray(state.handoffNotes) ? state.handoffNotes : [];
+  state.arrivalHistogram = Array.isArray(state.arrivalHistogram) && state.arrivalHistogram.length === 24
+    ? state.arrivalHistogram.map((value) => Number(value) || 0)
+    : Array.from({ length: 24 }, () => 0);
   state.lastDreamAttemptAt ??= null;
   state.lastDreamMaterialFingerprint ??= null;
   state.recentDreams = Array.isArray(state.recentDreams) ? state.recentDreams : [];
   if (previousSchemaVersion < 9) {
     state.recentDreams = collapseDuplicateDreamHistory(state.recentDreams);
   }
-  state.schemaVersion = Math.max(10, previousSchemaVersion);
+  state.schemaVersion = Math.max(11, previousSchemaVersion);
   return state;
 }
 
@@ -203,7 +208,7 @@ function applySessionOverlay(state, event, now) {
 export function newState(now = new Date()) {
   const at = iso(now);
   return {
-    schemaVersion: 10,
+    schemaVersion: 11,
     revision: 0,
     consciousness: 'awake',
     lastConversationAt: at,
@@ -232,6 +237,7 @@ export function newState(now = new Date()) {
     contextDeliveries: {},
     recentConversationEvents: [],
     interactionUsage: {},
+    arrivalHistogram: Array.from({ length: 24 }, () => 0),
   };
 }
 
@@ -420,6 +426,7 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
     };
   }
   const wasSleeping = state.consciousness === 'sleeping';
+  const previousConversationMs = Date.parse(input.lastConversationAt ?? '');
   state.consciousness = 'awake';
   state.lastConversationAt = iso(now);
   // Any real conversation event is stronger evidence of presence than a
@@ -451,6 +458,22 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
     }
     : applyInteractionOutcome(state, type, now, options);
 
+  // Learn only from real semantic arrivals. Presence heartbeats and internal
+  // LMC recalls never become samples, and messages inside one long session do
+  // not flood the same hour bucket.
+  if (type && options.recordArrival === true) {
+    const gapMinutes = Number.isFinite(previousConversationMs)
+      ? (now.getTime() - previousConversationMs) / 60_000
+      : Infinity;
+    if (wasSleeping || gapMinutes >= Number(options.arrivalGapMinutes ?? 90)) {
+      const { hour } = localDayAndHour(now, options.timeZone ?? 'Asia/Shanghai');
+      for (let index = 0; index < 24; index += 1) {
+        state.arrivalHistogram[index] = Number((state.arrivalHistogram[index] * ARRIVAL_DECAY).toFixed(4));
+      }
+      state.arrivalHistogram[hour] = Number((state.arrivalHistogram[hour] + 1).toFixed(4));
+    }
+  }
+
   // Clients report semantic events only. Numeric deltas, self-selected
   // satisfaction and arbitrary thought text are intentionally ignored.
 
@@ -481,7 +504,12 @@ export function settleAndApplyConversationEvent(input, event = {}, now = new Dat
     settled.state,
     event,
     now,
-    options.interaction ?? {},
+    {
+      ...(options.interaction ?? {}),
+      recordArrival: options.recordArrival === true,
+      arrivalGapMinutes: options.arrivalGapMinutes,
+      timeZone: options.settle?.timeZone ?? options.timeZone ?? options.interaction?.timeZone,
+    },
   );
   return {
     ...applied,
@@ -551,6 +579,110 @@ export function applyDriveFeedback(input, feedback = {}, now = new Date()) {
   state.lastSettledAt = iso(now);
   state.revision += 1;
   return state;
+}
+
+// A message that was actually delivered can feed back into the thought pool.
+// It never directly edits drive values, avoiding a self-scoring loop.
+export function applyOutputReflux(input, driveKey, text = '', now = new Date(), amount = 0.30) {
+  const state = ensureStateShape(structuredClone(input));
+  if (!DRIVE_KEYS.includes(driveKey)) {
+    return { state, applied: false, reasonCode: 'unknown_drive', key: driveKey || null };
+  }
+  state.thoughtPool ??= newThoughtPool();
+  const result = reinforceThought(state.thoughtPool, driveKey, text, amount);
+  state.lastSettledAt = iso(now);
+  state.revision += 1;
+  return { state, applied: true, reasonCode: 'reinforced', key: driveKey, ...result };
+}
+
+// Recalled LMC metadata may gently resonate with drives.  Per-drive ceilings,
+// max affinity (not additive affinity), and a per-call cap keep this bounded.
+export function applyMemoryResonance(input, signals = [], now = new Date(), options = {}) {
+  const state = ensureStateShape(structuredClone(input));
+  const nudge = clamp(Number(options.nudge ?? 0.02), 0, 0.1);
+  const perCallCap = clamp(Number(options.perCallCap ?? 0.06), 0, 0.3);
+  const affinity = {};
+  for (const raw of Array.isArray(signals) ? signals : []) {
+    const map = MEMORY_AFFINITY[String(raw ?? '').trim().toLowerCase()];
+    if (!map) continue;
+    for (const [key, value] of Object.entries(map)) {
+      affinity[key] = Math.max(affinity[key] ?? 0, Number(value) || 0);
+    }
+  }
+  const applied = {};
+  for (const [key, value] of Object.entries(affinity)) {
+    if (value < RESONANCE_MIN_AFFINITY || !DRIVE_KEYS.includes(key)) continue;
+    const ceiling = clamp(Number(DIMENSIONS[key].ceiling ?? SATURATE_CEIL), 0.1, 1);
+    const before = Number(state.drives[key] ?? 0);
+    const delta = Math.min(nudge * value, perCallCap, Math.max(0, ceiling - before));
+    const after = Number((before + delta).toFixed(4));
+    if (after !== before) {
+      state.drives[key] = after;
+      applied[key] = Number((after - before).toFixed(4));
+    }
+  }
+  const changed = Object.keys(applied).length > 0;
+  if (changed) {
+    state.lastSettledAt = iso(now);
+    state.revision += 1;
+  }
+  return { state, applied, changed, reasonCode: changed ? 'resonated' : 'no_affinity' };
+}
+
+export function computeAnticipation(state, now = new Date(), options = {}) {
+  const histogram = Array.isArray(state?.arrivalHistogram) ? state.arrivalHistogram : [];
+  const total = histogram.reduce((sum, value) => sum + (Number(value) || 0), 0);
+  if (total < Number(options.minSamples ?? 8)) return 0;
+  const { hour } = localDayAndHour(now, options.timeZone ?? 'Asia/Shanghai');
+  const probability = (value) => (Number(histogram[((value % 24) + 24) % 24]) || 0) / total;
+  const windowAt = (value) => probability(value) + 0.6 * probability(value + 1) + 0.3 * probability(value - 1);
+  const peak = Math.max(...Array.from({ length: 24 }, (_, index) => windowAt(index)));
+  if (peak <= 0) return 0;
+  const relative = windowAt(hour) / peak;
+  if (relative < Number(options.quietGate ?? 0.15)) return 0;
+  const previous = Date.parse(state?.lastConversationAt ?? '');
+  const idleHours = Number.isFinite(previous) ? Math.max(0, (now.getTime() - previous) / 3_600_000) : 0;
+  return Number((relative * clamp(idleHours / Number(options.expectIdleHours ?? 3), 0, 1)).toFixed(3));
+}
+
+export function computeLonging(state, now = new Date(), options = {}) {
+  const histogram = Array.isArray(state?.arrivalHistogram) ? state.arrivalHistogram : [];
+  const total = histogram.reduce((sum, value) => sum + (Number(value) || 0), 0);
+  if (total < Number(options.minSamples ?? 8)) return 0;
+  const previous = Date.parse(state?.lastConversationAt ?? '');
+  if (!Number.isFinite(previous)) return 0;
+  const idleHours = Math.max(0, (now.getTime() - previous) / 3_600_000);
+  const onset = Number(options.onsetHours ?? 6);
+  const full = Number(options.fullHours ?? 18);
+  if (idleHours <= onset) return 0;
+  const byIdle = clamp((idleHours - onset) / Math.max(1, full - onset), 0, 1);
+  const { hour } = localDayAndHour(now, options.timeZone ?? 'Asia/Shanghai');
+  const probability = (value) => (Number(histogram[((value % 24) + 24) % 24]) || 0) / total;
+  const windowAt = (value) => probability(value) + 0.6 * probability(value + 1) + 0.3 * probability(value - 1);
+  const peak = Math.max(...Array.from({ length: 24 }, (_, index) => windowAt(index)));
+  if (peak <= 0) return 0;
+  const activeness = clamp(windowAt(hour) / peak, 0, 1);
+  if (activeness < Number(options.quietGate ?? 0.15)) return 0;
+  return Number((byIdle * activeness).toFixed(3));
+}
+
+export function applyLongingNudge(input, longing = 0, now = new Date(), options = {}) {
+  const state = ensureStateShape(structuredClone(input));
+  const ceiling = clamp(Number(DIMENSIONS.monitor.ceiling ?? SATURATE_CEIL), 0.1, 1);
+  const before = Number(state.drives.monitor ?? 0);
+  if (!(longing > 0) || before >= ceiling) return { state, applied: 0, changed: false };
+  const delta = Math.min(
+    clamp(Number(options.nudge ?? 0.02), 0, 0.1) * longing,
+    clamp(Number(options.cap ?? 0.04), 0, 0.2),
+    ceiling - before,
+  );
+  const after = Number((before + Math.max(0, delta)).toFixed(4));
+  state.drives.monitor = after;
+  if (after !== before) {
+    state.lastSettledAt = iso(now);
+    state.revision += 1;
+  }
+  return { state, applied: Number((after - before).toFixed(4)), changed: after !== before };
 }
 
 export function activeSessionOverlay(input, sessionId, now = new Date()) {

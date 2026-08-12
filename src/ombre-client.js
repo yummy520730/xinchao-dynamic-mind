@@ -1,5 +1,27 @@
 import { createHash } from 'node:crypto';
 
+function driveHints(drives = []) {
+  return (Array.isArray(drives) ? drives : [])
+    .slice(0, 3)
+    .map((item) => String(item?.label ?? item?.key ?? '').trim())
+    .filter(Boolean)
+    .join('、');
+}
+
+function bridgeMaterial(result, maxChars = 10000) {
+  const signals = new Set();
+  for (const item of Array.isArray(result?.items) ? result.items : []) {
+    for (const value of [item?.category, item?.thread]) {
+      const clean = String(value ?? '').trim().toLowerCase();
+      if (clean) signals.add(clean);
+    }
+  }
+  return {
+    text: String(result?.context ?? '').slice(0, maxChars),
+    signals: [...signals].slice(0, 16),
+  };
+}
+
 export class OmbreClient {
   constructor(config) {
     this.config = config;
@@ -58,7 +80,7 @@ export class OmbreClient {
           params: {
             protocolVersion: '2025-06-18',
             capabilities: {},
-            clientInfo: { name: 'xinchao-dynamic-mind', version: '2.4.0-lmc.3' },
+            clientInfo: { name: 'xinchao-dynamic-mind', version: '2.5.12-lmc.1' },
           },
         });
         if (!this.sessionId) throw new Error('Ombre MCP did not return a session id');
@@ -81,38 +103,48 @@ export class OmbreClient {
     throw new Error('Ombre MCP call failed after session refresh');
   }
 
-  async recentMaterial() {
+  async recentMaterialBundle(drives = []) {
     if (this.config.transport === 'lmc5_bridge') {
+      const hints = driveHints(drives);
       const result = await this.bridgePost('/bridge/xinchao/recall', {
-        query: '近期重要记忆、情绪、关系变化和未完成事项；排除以前由心潮生成的梦境',
+        query: `近期重要记忆、情绪、关系变化和未完成事项${hints ? `；当前心潮主题：${hints}` : ''}；排除以前由心潮生成的梦境`,
         max_results: this.config.breathMaxResults, max_tokens: this.config.breathMaxTokens,
         exclude_sources: ['xinchao'],
       });
-      return String(result.context ?? '').slice(0, 10000);
+      return bridgeMaterial(result);
     }
     const result = await this.call(this.config.readTool ?? 'breath', {
       query: '近期重要记忆、情绪、关系变化和未完成事项',
       max_results: this.config.breathMaxResults,
       max_tokens: this.config.breathMaxTokens
     });
-    return extractText(result).slice(0, 10000);
+    return { text: extractText(result).slice(0, 10000), signals: [] };
   }
 
-  async daytimeMaterial() {
+  async recentMaterial(drives = []) {
+    return (await this.recentMaterialBundle(drives)).text;
+  }
+
+  async daytimeMaterialBundle(drives = []) {
     if (this.config.transport === 'lmc5_bridge') {
+      const hints = driveHints(drives);
       const result = await this.bridgePost('/bridge/xinchao/recall', {
-        query: '白天自然浮现的近期记忆、具体细节、未说完的话和当下牵挂；排除以前由心潮生成的梦境',
+        query: `白天自然浮现的近期记忆、具体细节、未说完的话和当下牵挂${hints ? `；当前心潮主题：${hints}` : ''}；排除以前由心潮生成的梦境`,
         max_results: this.config.breathMaxResults, max_tokens: this.config.breathMaxTokens,
         exclude_sources: ['xinchao'],
       });
-      return String(result.context ?? '').slice(0, 10000);
+      return bridgeMaterial(result);
     }
     const result = await this.call(this.config.readTool ?? 'breath', {
       query: '白天自然浮现的近期记忆、具体细节、未说完的话和当下牵挂；不要返回系统配置或技术信息',
       max_results: this.config.breathMaxResults,
       max_tokens: this.config.breathMaxTokens
     });
-    return extractText(result).slice(0, 10000);
+    return { text: extractText(result).slice(0, 10000), signals: [] };
+  }
+
+  async daytimeMaterial(drives = []) {
+    return (await this.daytimeMaterialBundle(drives)).text;
   }
 
   async recentContinuityMaterial(maxTokens = this.config.breathMaxTokens) {
