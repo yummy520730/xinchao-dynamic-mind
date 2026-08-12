@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activeSessionOverlay, applyConversationEvent, applyDriveFeedback, applyOmbreHeartbeat, barkAllowed, barkDuplicateCheck, barkMessageSimilarity, breathDreamContext, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, dreamDuplicateCheck, dreamMaterialFingerprint, newState, proactiveBarkAllowed, recentBarkHistory, recordBark, recordDaytimeEmergence, recordDream, recordDreamAttempt, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleState } from '../src/engine.js';
+import { activeSessionOverlay, applyConversationEvent, applyDriveFeedback, applyMemoryResonance, applyOmbreHeartbeat, barkAllowed, barkDuplicateCheck, barkMessageSimilarity, breathDreamContext, computeLonging, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, dreamDuplicateCheck, dreamMaterialFingerprint, newState, proactiveBarkAllowed, recentBarkHistory, recordBark, recordDaytimeEmergence, recordDream, recordDreamAttempt, scheduleDaytimeEmergence, sharesLongFragment, settleAndApplyConversationEvent, settleState } from '../src/engine.js';
 import { DIMENSIONS } from '../src/dimensions.js';
 
 test('idle time enters sleep and repeated settlement is idempotent at same instant', () => {
@@ -70,7 +70,7 @@ test('Bark history spans message kinds and keeps only the latest eight sends', (
     if (index === 2) state = recordDaytimeEmergence(state, `message-${index}`, at);
     else state = recordBark(state, at, { kind: index % 2 ? 'dream' : 'autonomous_thought', message: `message-${index}` });
   }
-  assert.equal(state.schemaVersion, 8);
+  assert.equal(state.schemaVersion, 11);
   assert.deepEqual(recentBarkHistory(state).map((item) => item.message), ['message-1', 'message-2', 'message-3', 'message-4', 'message-5', 'message-6', 'message-7', 'message-8']);
   assert.deepEqual(new Set(recentBarkHistory(state).map((item) => item.kind)), new Set(['dream', 'daytime_emergence', 'autonomous_thought']));
 });
@@ -223,7 +223,7 @@ test('old state schemas migrate even when settlement time has not advanced', () 
   delete old.contextDeliveries;
   delete old.handoffNotes;
   const settled = settleState(old, now, 90);
-  assert.equal(settled.state.schemaVersion, 8);
+  assert.equal(settled.state.schemaVersion, 11);
   assert.deepEqual(settled.state.handoffNotes, []);
   assert.equal(settled.changed, true);
   assert.equal(settled.state.revision, 1);
@@ -240,4 +240,73 @@ test('dream fingerprints reject repeated scenes and skipped dreams keep the inte
   const fingerprint = dreamMaterialFingerprint('相同材料', [{ key:'monitor', value:.5 }]);
   state = recordDreamAttempt(state, attemptedAt, fingerprint);
   assert.equal(dreamAllowed(state, new Date('2026-07-28T09:00:00Z'), 6, 4), false);
+});
+
+test('presence-only heartbeat refreshes presence without waking or resetting the idle clock', () => {
+  const start = new Date('2026-07-16T00:00:00Z');
+  const sleeping = settleState(newState(start), new Date('2026-07-16T02:00:00Z'), 90).state;
+  assert.equal(sleeping.consciousness, 'sleeping');
+  const heartbeatAt = new Date('2026-07-16T03:00:00Z');
+  const longingBefore = computeLonging(sleeping, heartbeatAt);
+
+  const result = applyConversationEvent(sleeping, {}, heartbeatAt, { presenceOnly: true });
+  assert.equal(result.changed, true);
+  assert.equal(result.interaction.reasonCode, 'presence_only');
+  assert.equal(result.state.consciousness, 'sleeping');
+  assert.equal(result.state.lastHeartbeatAt, '2026-07-16T03:00:00.000Z');
+  assert.equal(result.state.lastConversationAt, sleeping.lastConversationAt);
+  assert.deepEqual(result.state.pendingAwareness, sleeping.pendingAwareness);
+  assert.equal(computeLonging(result.state, heartbeatAt), longingBefore);
+
+  // The ombre file heartbeat goes through the same presence-only path.
+  const ombre = applyOmbreHeartbeat(sleeping, heartbeatAt);
+  assert.equal(ombre.state.consciousness, 'sleeping');
+  assert.equal(ombre.state.lastConversationAt, sleeping.lastConversationAt);
+  assert.equal(ombre.state.lastHeartbeatAt, '2026-07-16T03:00:00.000Z');
+});
+
+test('memory resonance per-call cap bounds the whole call, not each drive', () => {
+  const now = new Date('2026-07-28T02:00:00Z');
+  const state = newState(now);
+  const result = applyMemoryResonance(state, ['relationship'], now, { nudge: 0.05, perCallCap: 0.06 });
+  // 'relationship' qualifies four drives (possess/monitor/crave/share) for a
+  // combined ~0.14 of nudge, but one call may only spend 0.06 in total.
+  const total = Object.values(result.applied).reduce((sum, value) => sum + value, 0);
+  assert.ok(total <= 0.06 + 1e-9, `total resonance ${total} exceeded the per-call cap`);
+  assert.ok(result.applied.possess > 0.04);
+  assert.deepEqual(Object.keys(result.applied).sort(), ['monitor', 'possess']);
+  assert.equal(result.state.drives.crave, state.drives.crave);
+  assert.equal(result.state.drives.share, state.drives.share);
+});
+
+test('dream dedup rejects a reshelled dream sharing one long template sentence', () => {
+  const now = new Date('2026-07-28T01:00:00Z');
+  const template = '越想靠近周围景物越慢，像有谁把时间拉成了细丝，一圈一圈';
+  const existing = {
+    id: 'dream-1',
+    createdAt: now.toISOString(),
+    dream: `走进一条下雨的旧街，${template}，最后停在屋檐下。`,
+    residue: '醒来还记得那场雨。',
+    awareness: '这是梦。',
+  };
+  const state = recordDream(newState(now), existing);
+  // A different shell around the same long template sentence is still a replay,
+  // even though whole-text similarity stays below the 0.62 threshold.
+  const reshelled = {
+    dream: `海边起雾的清晨，${template}，脚印被潮水抹平。`,
+    residue: '掌心留着雾气。',
+    awareness: '梦境余韵。',
+  };
+  assert.equal(sharesLongFragment(reshelled.dream, existing.dream), true);
+  const check = dreamDuplicateCheck(reshelled, state, 0.62);
+  assert.ok(check.similarity < 0.62, 'whole-text similarity should not catch this');
+  assert.equal(check.sharedFragment, true);
+  assert.equal(check.duplicate, true);
+  // Genuinely new text sharing no long fragment still passes.
+  const fresh = {
+    dream: '山顶的钟楼倒着走，指针刮擦云层的声响像远处磨刀。',
+    residue: '醒来还记得钟声。',
+    awareness: '这是梦。',
+  };
+  assert.equal(dreamDuplicateCheck(fresh, state, 0.62).duplicate, false);
 });
