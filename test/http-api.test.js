@@ -108,7 +108,10 @@ test('POST /v1/handoff-note stores a bounded idempotent note for HTTP clients', 
   assert.equal(stateAfterHeartbeat.status, 200);
   const heartbeatState = await stateAfterHeartbeat.json();
   assert.ok(Number.isFinite(Date.parse(heartbeatState.lastHeartbeatAt)));
-  assert.equal(heartbeatState.lastHeartbeatAt, heartbeatState.lastConversationAt);
+  // Presence-only heartbeat refreshes presence time without pretending to be
+  // a conversation: the idle clock, consciousness and longing stay untouched.
+  assert.notEqual(heartbeatState.lastHeartbeatAt, heartbeatState.lastConversationAt);
+  assert.equal(heartbeatState.consciousness, 'awake');
 
   const unauthorized = await fetch(`${baseUrl}/v1/handoff-note`, {
     method: 'POST',
