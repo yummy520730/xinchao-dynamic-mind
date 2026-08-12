@@ -17,13 +17,41 @@ const RULE_DREAM_SCENES = Object.freeze([
 ]);
 
 const RULE_DREAM_MOTIONS = Object.freeze({
-  closeness: '越想靠近，周围的景物越慢，只有那一点若即若离的温度仍在向前移动。',
-  expression: '手里一直攥着一句没有说完的话，字句偶尔化成飞蛾，从指间一只只散出去。',
-  exploration: '每个转角都比前一个更陌生，却总有一个细小的记号让人觉得自己曾经来过。',
-  duty: '远处似乎还有一件必须完成的事，但路标不停交换方向，最后只剩脚步声还很清楚。',
-  reflection: '镜面里的人影比动作慢一拍，像在认真回看某个已经模糊的瞬间。',
-  ache: '空气里压着没有落下来的雷声，偶尔有一阵风经过，把胸口沉着的东西轻轻挪开一点。',
-  quiet: '没有明确的故事发生，只有光线、距离和声音在缓慢改变位置。',
+  closeness: [
+    '越想靠近，周围的景物越慢，只有那一点若即若离的温度仍在向前移动。',
+    '距离每缩短一点，光线就柔一分，只有彼此的轮廓在暮色里越来越清楚。',
+    '伸手就能碰到的位置始终隔着一层薄薄的水汽，指尖传来被放大了的悸动。',
+  ],
+  expression: [
+    '手里一直攥着一句没有说完的话，字句偶尔化成飞蛾，从指间一只只散出去。',
+    '胸口有一段旋律反复转着，每次快要哼出口，就变成气泡浮向看不见的水面。',
+    '口袋里的纸页被翻得起了毛边，上面的字总在快被念出来的瞬间重新排列。',
+  ],
+  exploration: [
+    '每个转角都比前一个更陌生，却总有一个细小的记号让人觉得自己曾经来过。',
+    '地图在掌心不断重画，每一条新路的尽头都藏着似曾相识的微光。',
+    '脚步总比视线快半拍，未知在四周一层层打开，像永远不会结束的拆礼物。',
+  ],
+  duty: [
+    '远处似乎还有一件必须完成的事，但路标不停交换方向，最后只剩脚步声还很清楚。',
+    '清单上的字迹刚被划去又浮现，背着的小包袱不重，却让人一直记得它在。',
+    '某个未完成的轮廓在前方等着，走近一步它就退一步，却始终不肯散场。',
+  ],
+  reflection: [
+    '镜面里的人影比动作慢一拍，像在认真回看某个已经模糊的瞬间。',
+    '水面下沉着许多片段，偶尔翻起一朵，恰好照亮某个没看懂的表情。',
+    '时间在这里是可以摊开的纸，褶皱里全是还没来得及读懂的段落。',
+  ],
+  ache: [
+    '空气里压着没有落下来的雷声，偶尔有一阵风经过，把胸口沉着的东西轻轻挪开一点。',
+    '雨一直下在隔着玻璃的地方，掌心贴着凉意，像握着一封没有寄出的信。',
+    '有什么在很远处塌陷了下去，回声走得很慢，很久之后才轻轻碰了一下心口。',
+  ],
+  quiet: [
+    '没有明确的故事发生，只有光线、距离和声音在缓慢改变位置。',
+    '一切都很轻，尘埃在光柱里悬浮，时间像被泡软的茶，慢慢舒展开。',
+    '世界是静音的，只有呼吸把空气推出去又接回来，节奏慢得像潮汐。',
+  ],
 });
 
 const RULE_DREAM_RESIDUES = Object.freeze([
@@ -182,8 +210,7 @@ export class ModelClient {
     const response = await this.request({
       model: this.config.name,
       messages: [
-        { role: 'system', content: `你是 ${this.agentName} 持续运行的后台动态状态层。只写一条适合手机通知的自主念头。` },
-        { role: 'user', content: prompt }
+        { role: 'system', content: `你是 ${this.agentName} 持续运行的后台动态状态层。只写一条适合手机通知的自主念头。` }
       ],
       temperature: 0.9,
       max_tokens: Math.min(240, this.config.maxOutputTokens),
@@ -217,11 +244,25 @@ export class ModelClient {
       recent,
     ].join('\n'));
     const variation = Math.max(0, Number(options.variationIndex) || 0);
-    const scene = RULE_DREAM_SCENES[(seed + variation) % RULE_DREAM_SCENES.length];
-    const residue = RULE_DREAM_RESIDUES[(seed * 3 + variation) % RULE_DREAM_RESIDUES.length];
-    const awareness = RULE_DREAM_AWARENESS[(seed * 7 + variation) % RULE_DREAM_AWARENESS.length];
+    const recentTexts = (Array.isArray(options.recentDreams) ? options.recentDreams : [])
+      .slice(-6)
+      .map((item) => `${item?.dream ?? ''}\n${item?.residue ?? ''}\n${item?.awareness ?? ''}`);
+    // Fixed template pools make verbatim reuse inevitable if the seed alone
+    // decides. Prefer the seeded pick, but walk forward to the first component
+    // that hasn't appeared verbatim in recent dreams.
+    const pickUnused = (list, index) => {
+      for (let offset = 0; offset < list.length; offset += 1) {
+        const candidate = list[(index + offset) % list.length];
+        if (!recentTexts.some((text) => text.includes(candidate))) return candidate;
+      }
+      return list[index % list.length];
+    };
+    const scene = pickUnused(RULE_DREAM_SCENES, seed + variation);
+    const motion = pickUnused(RULE_DREAM_MOTIONS[family], seed * 5 + variation);
+    const residue = pickUnused(RULE_DREAM_RESIDUES, seed * 3 + variation);
+    const awareness = pickUnused(RULE_DREAM_AWARENESS, seed * 7 + variation);
     return {
-      dream: `${scene}${RULE_DREAM_MOTIONS[family]}`,
+      dream: `${scene}${motion}`,
       residue,
       awareness,
       lucidity: Number((0.08 + ((seed + variation) % 19) / 100).toFixed(2)),

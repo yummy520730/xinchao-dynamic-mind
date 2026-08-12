@@ -427,6 +427,27 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
   }
   const wasSleeping = state.consciousness === 'sleeping';
   const previousConversationMs = Date.parse(input.lastConversationAt ?? '');
+  // Presence-only heartbeats prove the user is around, nothing more. They must
+  // not wake the system, reset the conversation idle clock (longing/anticipation
+  // depend on it), or fabricate dream awareness — only lastHeartbeatAt moves.
+  if (options.presenceOnly === true && !type) {
+    state.lastHeartbeatAt = iso(now);
+    state.revision += 1;
+    return {
+      state,
+      changed: true,
+      duplicate: false,
+      wasSleeping,
+      sessionId,
+      sessionCreated: false,
+      interaction: {
+        type: null,
+        applied: false,
+        reasonCode: 'presence_only',
+        affectedDrives: [],
+      },
+    };
+  }
   state.consciousness = 'awake';
   state.lastConversationAt = iso(now);
   // Any real conversation event is stronger evidence of presence than a
@@ -508,6 +529,7 @@ export function settleAndApplyConversationEvent(input, event = {}, now = new Dat
       ...(options.interaction ?? {}),
       recordArrival: options.recordArrival === true,
       arrivalGapMinutes: options.arrivalGapMinutes,
+      presenceOnly: options.presenceOnly === true,
       timeZone: options.settle?.timeZone ?? options.timeZone ?? options.interaction?.timeZone,
     },
   );
@@ -554,9 +576,7 @@ export function pickIntent(state, random = Math.random) {
 // ── Heartbeat / idle ──────────────────────────────────────────────
 
 export function applyOmbreHeartbeat(input, now = new Date()) {
-  const result = applyConversationEvent(input, {}, now);
-  result.state.lastHeartbeatAt = iso(now);
-  return result;
+  return applyConversationEvent(input, {}, now, { presenceOnly: true });
 }
 
 export function contactIdleAllowed(state, now, minIdleHours) {
@@ -610,15 +630,18 @@ export function applyMemoryResonance(input, signals = [], now = new Date(), opti
     }
   }
   const applied = {};
+  let budget = perCallCap;
   for (const [key, value] of Object.entries(affinity)) {
+    if (budget <= 0) break;
     if (value < RESONANCE_MIN_AFFINITY || !DRIVE_KEYS.includes(key)) continue;
     const ceiling = clamp(Number(DIMENSIONS[key].ceiling ?? SATURATE_CEIL), 0.1, 1);
     const before = Number(state.drives[key] ?? 0);
-    const delta = Math.min(nudge * value, perCallCap, Math.max(0, ceiling - before));
+    const delta = Math.min(nudge * value, budget, Math.max(0, ceiling - before));
     const after = Number((before + delta).toFixed(4));
     if (after !== before) {
       state.drives[key] = after;
       applied[key] = Number((after - before).toFixed(4));
+      budget = Number((budget - applied[key]).toFixed(4));
     }
   }
   const changed = Object.keys(applied).length > 0;
@@ -765,6 +788,28 @@ export function dreamSimilarity(left, right) {
   return Number(Math.max(dice, containment * 0.92).toFixed(4));
 }
 
+// Template-assembled dreams can re-share one long component (e.g. the same
+// motion sentence) while the rest differs, which whole-text n-gram similarity
+// scores far below the duplicate threshold. A shared continuous fragment with
+// the immediately previous dream is a duplicate regardless of the global
+// score. Only the latest dream is compared: fixed template pools make overlap
+// with older dreams inevitable, and a wider window would eventually reject
+// every new dream and starve shadow-mode dreaming entirely.
+const SHARED_FRAGMENT_MIN_CHARS = 20;
+const SHARED_FRAGMENT_LOOKBACK = 1;
+
+export function sharesLongFragment(left, right, minChars = SHARED_FRAGMENT_MIN_CHARS) {
+  const a = normalizeDreamText(left);
+  const b = normalizeDreamText(right);
+  if (!a || !b) return false;
+  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
+  if (shorter.length < minChars) return shorter === longer;
+  for (let index = 0; index + minChars <= shorter.length; index += 4) {
+    if (longer.includes(shorter.slice(index, index + minChars))) return true;
+  }
+  return false;
+}
+
 export function collapseDuplicateDreamHistory(items, threshold = 0.94) {
   const keptNewestFirst = [];
   for (const dream of (Array.isArray(items) ? items : []).slice().reverse()) {
@@ -783,12 +828,20 @@ export function dreamDuplicateCheck(dream, state, threshold = 0.62) {
   const fingerprint = dreamFingerprint(dream);
   let similarity = 0;
   let matchedDreamId = null;
-  for (const existing of (state?.recentDreams ?? []).slice(-MAX_RECENT_DREAMS)) {
+  let sharedFragment = false;
+  const recent = (state?.recentDreams ?? []).slice(-MAX_RECENT_DREAMS);
+  for (const existing of recent) {
     const score = fingerprint && fingerprint === (existing?.fingerprint || dreamFingerprint(existing))
       ? 1 : dreamSimilarity(dream, existing);
     if (score > similarity) { similarity = score; matchedDreamId = existing?.id ?? null; }
   }
-  return { duplicate: similarity >= threshold, fingerprint, similarity, matchedDreamId };
+  for (const existing of recent.slice(-SHARED_FRAGMENT_LOOKBACK)) {
+    if (sharesLongFragment(dreamText(dream), dreamText(existing))) {
+      sharedFragment = true;
+      matchedDreamId = existing?.id ?? matchedDreamId;
+    }
+  }
+  return { duplicate: sharedFragment || similarity >= threshold, fingerprint, similarity, matchedDreamId, sharedFragment };
 }
 
 export function recordDreamAttempt(input, now = new Date(), materialFingerprint = null) {
