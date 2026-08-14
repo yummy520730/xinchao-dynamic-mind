@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activeSessionOverlay, applyConversationEvent, applyDriveFeedback, applyMemoryResonance, applyOmbreHeartbeat, barkAllowed, barkDuplicateCheck, barkMessageSimilarity, breathDreamContext, computeLonging, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, dreamDuplicateCheck, dreamMaterialFingerprint, newState, proactiveBarkAllowed, recentBarkHistory, recordBark, recordDaytimeEmergence, recordDream, recordDreamAttempt, scheduleDaytimeEmergence, sharesLongFragment, settleAndApplyConversationEvent, settleState } from '../src/engine.js';
+import { activeSessionOverlay, applyConversationEvent, applyDriveFeedback, applyMemoryResonance, applyOmbreHeartbeat, applyStateSignal, barkAllowed, barkDuplicateCheck, barkMessageSimilarity, breathDreamContext, computeLonging, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, dreamDuplicateCheck, dreamMaterialFingerprint, newState, proactiveBarkAllowed, recentBarkHistory, recordBark, recordDaytimeEmergence, recordDream, recordDreamAttempt, scheduleDaytimeEmergence, sharesLongFragment, settleAndApplyConversationEvent, settleState } from '../src/engine.js';
 import { DIMENSIONS } from '../src/dimensions.js';
 
 test('idle time enters sleep and repeated settlement is idempotent at same instant', () => {
@@ -70,7 +70,7 @@ test('Bark history spans message kinds and keeps only the latest eight sends', (
     if (index === 2) state = recordDaytimeEmergence(state, `message-${index}`, at);
     else state = recordBark(state, at, { kind: index % 2 ? 'dream' : 'autonomous_thought', message: `message-${index}` });
   }
-  assert.equal(state.schemaVersion, 11);
+  assert.equal(state.schemaVersion, 12);
   assert.deepEqual(recentBarkHistory(state).map((item) => item.message), ['message-1', 'message-2', 'message-3', 'message-4', 'message-5', 'message-6', 'message-7', 'message-8']);
   assert.deepEqual(new Set(recentBarkHistory(state).map((item) => item.kind)), new Set(['dream', 'daytime_emergence', 'autonomous_thought']));
 });
@@ -180,6 +180,58 @@ test('conversation event ids make interaction settlement idempotent', () => {
   assert.equal('eventId' in second.state.recentConversationEvents[0], false);
 });
 
+test('intimacy cue ignites body drives once without becoming completed intimacy', () => {
+  const now = new Date('2026-07-28T01:00:00Z');
+  const event = { eventId: 'state-cue-opaque-1', signalType: 'intimacy_cue', origin: 'user' };
+  const initial = newState(now);
+  const first = applyStateSignal(initial, event, now);
+  const repeated = applyStateSignal(first.state, event, now);
+
+  assert.equal(first.signal.applied, true);
+  assert.deepEqual(first.signal.affectedDrives, ['libido', 'crave', 'possess']);
+  assert.ok(first.state.drives.libido > initial.drives.libido);
+  assert.ok(first.state.drives.crave > initial.drives.crave);
+  assert.ok(first.state.drives.possess > initial.drives.possess);
+  assert.equal(first.state.recentConversationEvents.length, 0);
+  assert.deepEqual(first.state.interactionUsage, {});
+  assert.equal(repeated.duplicate, true);
+  assert.deepEqual(repeated.state.drives, first.state.drives);
+});
+
+test('completed intimacy still relieves body drives and is separate from cue settlement', () => {
+  const now = new Date('2026-07-28T01:00:00Z');
+  const cue = applyStateSignal(newState(now), {
+    eventId: 'state-cue-opaque-2', signalType: 'intimacy_cue', origin: 'user',
+  }, now);
+  const completed = settleAndApplyConversationEvent(cue.state, {
+    sessionId: 'claude-window', eventId: 'completed-intimacy-2', interactionType: 'intimacy',
+  }, now, { interaction: { timeZone: 'Asia/Shanghai', maxInteractionEffectsPerDay: 24 } });
+
+  assert.equal(completed.interaction.applied, true);
+  assert.ok(completed.state.drives.libido < cue.state.drives.libido);
+  assert.ok(completed.state.drives.crave < cue.state.drives.crave);
+  assert.ok(completed.state.drives.possess < cue.state.drives.possess);
+  assert.equal(completed.state.recentStateSignals.length, 1);
+  assert.equal(completed.state.recentConversationEvents.length, 1);
+  assert.equal(completed.state.stateSignalUsage['2026-07-28'], 1);
+  assert.equal(completed.state.interactionUsage['2026-07-28'], 1);
+});
+
+test('state signal short-window and daily limits prevent repeated drive stacking', () => {
+  const now = new Date('2026-07-28T01:00:00Z');
+  const options = { timeZone: 'Asia/Shanghai', maxPerDay: 2, windowMinutes: 10, maxPerWindow: 1 };
+  const first = applyStateSignal(newState(now), {
+    eventId: 'state-limit-1', signalType: 'intimacy_cue', origin: 'user',
+  }, now, options);
+  const limited = applyStateSignal(first.state, {
+    eventId: 'state-limit-2', signalType: 'intimacy_cue', origin: 'user',
+  }, new Date('2026-07-28T01:01:00Z'), options);
+
+  assert.equal(limited.signal.applied, false);
+  assert.equal(limited.signal.reasonCode, 'short_window_signal_limit');
+  assert.deepEqual(limited.state.drives, first.state.drives);
+});
+
 test('daily interaction effect limit fails closed without blocking conversation state', () => {
   const now = new Date('2026-07-28T01:00:00Z');
   const options = {
@@ -223,7 +275,7 @@ test('old state schemas migrate even when settlement time has not advanced', () 
   delete old.contextDeliveries;
   delete old.handoffNotes;
   const settled = settleState(old, now, 90);
-  assert.equal(settled.state.schemaVersion, 11);
+  assert.equal(settled.state.schemaVersion, 12);
   assert.deepEqual(settled.state.handoffNotes, []);
   assert.equal(settled.changed, true);
   assert.equal(settled.state.revision, 1);

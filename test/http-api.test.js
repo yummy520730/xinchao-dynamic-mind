@@ -154,6 +154,40 @@ test('POST /v1/handoff-note stores a bounded idempotent note for HTTP clients', 
     noteLength: note.length,
   });
 
+  const stateBeforeCueResponse = await fetch(`${baseUrl}/v1/state`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  const stateBeforeCue = await stateBeforeCueResponse.json();
+  const libidoSnapshot = await (await fetch(`${baseUrl}/v1/libido-snapshot`, {
+    headers: { authorization: `Bearer ${token}` },
+  })).json();
+  assert.deepEqual(libidoSnapshot, { libido: stateBeforeCue.drives.libido });
+  const cueRequest = () => fetch(`${baseUrl}/v1/state-signal`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ event_id: 'http-state-cue-1', signal_type: 'intimacy_cue', origin: 'user' }),
+  });
+  const cue = await cueRequest();
+  assert.equal(cue.status, 200);
+  const cueResult = await cue.json();
+  assert.equal(cueResult.signal.applied, true);
+  const repeatedCueResult = await (await cueRequest()).json();
+  assert.equal(repeatedCueResult.duplicate, true);
+  const stateAfterCue = await (await fetch(`${baseUrl}/v1/state`, {
+    headers: { authorization: `Bearer ${token}` },
+  })).json();
+  assert.ok(stateAfterCue.drives.libido > stateBeforeCue.drives.libido);
+  assert.ok(stateAfterCue.drives.crave > stateBeforeCue.drives.crave);
+
+  const directSignalDelta = await fetch(`${baseUrl}/v1/state-signal`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      event_id: 'http-state-cue-2', signal_type: 'intimacy_cue', origin: 'user', driveDeltas: { libido: 1 },
+    }),
+  });
+  assert.equal(directSignalDelta.status, 400);
+
   const context = await fetch(
     `${baseUrl}/v1/context?mode=inspect&session_id=http-window&force=true`,
     { headers: { authorization: `Bearer ${token}` } },

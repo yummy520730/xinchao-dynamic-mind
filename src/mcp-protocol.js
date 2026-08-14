@@ -58,6 +58,42 @@ export const XINCHAO_TOOLS = [
     },
   },
   {
+    name: 'xinchao_state_signal',
+    title: '提交受限状态信号',
+    description: [
+      '提交 deterministic state machine 已确认的身体点火信号；它不是已完成互动。',
+      '第一版只接受 intimacy_cue 且 origin=user；客户端不能提交 drive delta。',
+      'event_id 用于幂等，重试必须复用同一个值。不要用本工具上报“我正在想她”等模型自造事件。',
+    ].join(''),
+    inputSchema: {
+      type: 'object',
+      properties: {
+        event_id: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 120,
+          description: 'DSM 用户事件的稳定不透明标识。',
+        },
+        signal_type: {
+          type: 'string',
+          enum: ['intimacy_cue'],
+        },
+        origin: {
+          type: 'string',
+          enum: ['user'],
+        },
+      },
+      required: ['event_id', 'signal_type', 'origin'],
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
     name: 'xinchao_event',
     title: '回传心潮窗口事件',
     description: [
@@ -271,6 +307,16 @@ function eventArgs(args = {}, fallbackSessionId = '') {
   };
 }
 
+function stateSignalArgs(args = {}) {
+  const eventId = String(args.event_id ?? '').trim().slice(0, 120);
+  if (!eventId) throw new Error('event_id 是必填项，用于避免重复点火');
+  const signalType = String(args.signal_type ?? '').trim().toLowerCase();
+  if (signalType !== 'intimacy_cue') throw new Error('signal_type 目前只允许 intimacy_cue');
+  const origin = String(args.origin ?? '').trim().toLowerCase();
+  if (origin !== 'user') throw new Error('origin 目前只允许 user');
+  return { eventId, signalType, origin };
+}
+
 function handoffNoteArgs(args = {}, fallbackSessionId = '') {
   const sessionId = stableSessionId(args, fallbackSessionId);
   if (!sessionId) throw new Error('session_id 是必填项');
@@ -303,6 +349,14 @@ async function callTool(name, args, handlers) {
       ? envelope.additionalContext
       : '本窗口的心潮交接已经完成，本次不重复注入。';
     return toolText(text, envelope);
+  }
+  if (name === 'xinchao_state_signal') {
+    const result = await handlers.stateSignal(stateSignalArgs(args));
+    const duplicate = result.duplicate ? ' duplicate=true' : '';
+    return toolText(
+      `心潮状态信号已接收：signal=${result.signal?.type}:${result.signal?.reasonCode}${duplicate}`,
+      result,
+    );
   }
   if (name === 'xinchao_event') {
     const result = await handlers.event(eventArgs(args, fallbackSessionId));
@@ -350,10 +404,11 @@ export async function handleMcpMessage(payload, handlers) {
         serverInfo: {
           name: 'xinchao-dynamic-mind',
           title: '心潮动态心智系统',
-          version: '2.5.12-lmc.1',
+          version: '2.5.14-lmc.1',
         },
         instructions: [
           '新窗口开始时调用 xinchao_context；服务端会绑定当前 MCP 连接，无需自行编写 session_id。',
+          'xinchao_state_signal 只接收外部 deterministic state machine 已确认的用户点火信号；不要由模型自造。',
           '一次实际互动后可调用 xinchao_event 更新窗口短状态；event_id 必须唯一，重试时复用。',
           '需要换窗续接时可调用 xinchao_handoff_note 保存近期进度摘要；不要提交聊天原文或人物基岩。',
           '只有结果明确的真实互动才调用，且必须填写 interaction_type；不要提交聊天正文或欲望数值。',

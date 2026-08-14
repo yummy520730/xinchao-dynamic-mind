@@ -54,7 +54,22 @@ test('session-start envelope carries recent continuity without pretending to be 
   assert.match(envelope.additionalContext, /近期交接便签（非原文）/);
   assert.match(envelope.additionalContext, /近期连续性（不替代基岩）/);
   assert.match(envelope.additionalContext, /最近发生的事/);
+  assert.match(envelope.additionalContext, /身体层：crave=/);
   assert.ok(envelope.estimatedTokens <= 300);
+});
+
+test('body drives remain visible even when neither drive is in top four', () => {
+  const now = new Date('2026-07-28T01:00:00Z');
+  const state = newState(now);
+  state.drives.crave = 0.11;
+  state.drives.libido = 0.07;
+  for (const key of ['possess', 'monitor', 'share', 'curiosity', 'boredom']) state.drives[key] = 0.8;
+  const envelope = buildContextEnvelope({ state, sessionId: 'body-window', mode: 'inspect', now });
+  const dynamic = envelope.sections.find((section) => section.id === 'dynamic_state').data;
+
+  assert.equal(dynamic.topDrives.some((drive) => ['crave', 'libido'].includes(drive.key)), false);
+  assert.deepEqual(dynamic.body_drives, { crave: 0.11, libido: 0.07 });
+  assert.match(envelope.additionalContext, /身体层：crave=0\.110；libido=0\.070/);
 });
 
 test('session-start delivery is suppressed within the configured window', () => {

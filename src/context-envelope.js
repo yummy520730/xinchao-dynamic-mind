@@ -84,6 +84,10 @@ function dynamicSection(state, sessionId, now, timeZone = 'Asia/Shanghai') {
       label: drive.label,
       value: Number(Number(drive.value).toFixed(3)),
     })),
+    body_drives: {
+      crave: Number(Number(state.drives?.crave ?? 0).toFixed(3)),
+      libido: Number(Number(state.drives?.libido ?? 0).toFixed(3)),
+    },
     anticipation: computeAnticipation(state, now, { timeZone }),
     longing: computeLonging(state, now, { timeZone }),
     thoughts: thoughtSignals(state),
@@ -99,6 +103,7 @@ function renderDynamic(value) {
     `意识=${value.consciousness}`,
     `疲劳=${value.fatigue.toFixed(3)}`,
     drives ? `当前驱力：${drives}` : '',
+    `身体层：crave=${value.body_drives.crave.toFixed(3)}；libido=${value.body_drives.libido.toFixed(3)}`,
   ].filter(Boolean);
   if (value.longing >= 0.6) parts.push(`挂念：有点想她了（${value.longing.toFixed(2)}）`);
   else if (value.longing >= 0.35) parts.push(`挂念：惦记着她（${value.longing.toFixed(2)}）`);

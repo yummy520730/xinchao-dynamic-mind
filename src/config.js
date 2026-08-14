@@ -86,6 +86,12 @@ export function loadConfig() {
       maxEffectsPerDay: number('INTERACTION_MAX_EFFECTS_PER_DAY', 24, 1, 96),
       timeZone: process.env.INTERACTION_TIME_ZONE ?? process.env.SETTLE_TIME_ZONE ?? 'Asia/Shanghai',
     },
+    stateSignal: {
+      maxPerDay: number('STATE_SIGNAL_MAX_PER_DAY', 12, 1, 96),
+      windowMinutes: number('STATE_SIGNAL_WINDOW_MINUTES', 10, 1, 1440),
+      maxPerWindow: number('STATE_SIGNAL_MAX_PER_WINDOW', 3, 1, 24),
+      timeZone: process.env.STATE_SIGNAL_TIME_ZONE ?? process.env.SETTLE_TIME_ZONE ?? 'Asia/Shanghai',
+    },
     bridge: {
       enabled: bool('BRIDGE_ENABLED', false),
       machineToken: process.env.BRIDGE_MACHINE_TOKEN ?? '',

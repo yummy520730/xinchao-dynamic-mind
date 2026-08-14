@@ -23,6 +23,12 @@ function handlers() {
       sessionCreated: true,
       received: event,
     }),
+    stateSignal: async (event) => ({
+      revision: 8,
+      duplicate: false,
+      signal: { type: event.signalType, origin: event.origin, applied: true, reasonCode: 'applied' },
+      received: event,
+    }),
     handoffNote: async (note) => ({
       revision: 9,
       duplicate: false,
@@ -42,7 +48,7 @@ test('MCP initialize advertises the 2.4.0 tool server', async () => {
   assert.equal(result.status, 200);
   assert.equal(result.body.result.protocolVersion, '2025-06-18');
   assert.equal(result.body.result.serverInfo.name, 'xinchao-dynamic-mind');
-  assert.equal(result.body.result.serverInfo.version, '2.5.12-lmc.1');
+  assert.equal(result.body.result.serverInfo.version, '2.5.14-lmc.1');
   assert.equal(result.body.result.capabilities.tools.listChanged, false);
 });
 
@@ -54,21 +60,39 @@ test('tools/list exposes context, event and short handoff note tools', async () 
   }, handlers());
   assert.deepEqual(
     result.body.result.tools.map((tool) => tool.name),
-    ['xinchao_context', 'xinchao_event', 'xinchao_handoff_note', 'xinchao_from_me'],
+    ['xinchao_context', 'xinchao_state_signal', 'xinchao_event', 'xinchao_handoff_note', 'xinchao_from_me'],
   );
   assert.equal(result.body.result.tools[0].annotations.readOnlyHint, true);
   assert.equal(result.body.result.tools[1].annotations.destructiveHint, false);
   assert.equal(result.body.result.tools[1].annotations.idempotentHint, true);
   assert.deepEqual(result.body.result.tools[0].inputSchema.required, undefined);
   assert.equal(result.body.result.tools[0].inputSchema.properties.max_tokens.default, 2200);
-  assert.ok(result.body.result.tools[1].inputSchema.required.includes('event_id'));
-  assert.equal(result.body.result.tools[1].inputSchema.required.includes('session_id'), false);
-  assert.ok(result.body.result.tools[1].inputSchema.properties.interaction_type.enum.includes('sharing'));
-  assert.equal(result.body.result.tools[2].annotations.idempotentHint, true);
+  assert.deepEqual(result.body.result.tools[1].inputSchema.required, ['event_id', 'signal_type', 'origin']);
+  assert.deepEqual(result.body.result.tools[1].inputSchema.properties.signal_type.enum, ['intimacy_cue']);
+  assert.deepEqual(result.body.result.tools[1].inputSchema.properties.origin.enum, ['user']);
+  assert.ok(result.body.result.tools[2].inputSchema.required.includes('event_id'));
+  assert.equal(result.body.result.tools[2].inputSchema.required.includes('session_id'), false);
+  assert.ok(result.body.result.tools[2].inputSchema.properties.interaction_type.enum.includes('sharing'));
+  assert.equal(result.body.result.tools[3].annotations.idempotentHint, true);
   assert.deepEqual(
-    result.body.result.tools[2].inputSchema.required,
+    result.body.result.tools[3].inputSchema.required,
     ['event_id', 'note'],
   );
+});
+
+test('xinchao_state_signal accepts semantic input only and drops drive deltas', async () => {
+  const result = await handleMcpMessage({
+    jsonrpc: '2.0', id: 31, method: 'tools/call',
+    params: {
+      name: 'xinchao_state_signal',
+      arguments: {
+        event_id: 'dsm-cue-31', signal_type: 'intimacy_cue', origin: 'user',
+        driveDeltas: { libido: 1 },
+      },
+    },
+  }, handlers());
+  const received = result.body.result.structuredContent.received;
+  assert.deepEqual(received, { eventId: 'dsm-cue-31', signalType: 'intimacy_cue', origin: 'user' });
 });
 
 test('xinchao_context returns injectable text and structured envelope', async () => {

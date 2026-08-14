@@ -21,6 +21,8 @@
 - **短期交接便签**：`xinchao_handoff_note` 最多 1200 字、默认 72 小时过期，不保存整段聊天原文。
 - **远程 MCP + OAuth 2.1**：支持动态客户端注册、授权码 + PKCE、刷新令牌以及标准发现端点。
 - **幂等互动结算**：`xinchao_event` 使用 `event_id` 防止网络重试造成重复结算。
+- **身体点火与完成结算分离**：DSM 确认的 `intimacy_cue` 通过受限 state signal 提升身体驱力；`xinchao_event(intimacy)` 仍只表示真实完成后的满足与下降。
+- **固定身体观察窗**：`xinchao_context` 在 top drives 之外始终返回紧凑的 `body_drives.crave/libido`。
 - **隐私审计**：转换日志只保存结构化变化、摘要指纹和交付元数据，不保存聊天正文或认证令牌。
 - **2200 tokens 默认预算**：用于短期状态和近期连续性；稳定核心资料仍由客户端单独完整读取。
 
@@ -116,6 +118,7 @@ https://xinchao.example.com/mcp
 | 工具 | 作用 |
 | --- | --- |
 | `xinchao_context` | 获取当前动态短态和近期连续性；同一窗口首次启动默认只交付一次 |
+| `xinchao_state_signal` | 接收 DSM 已确认的 `intimacy_cue`；只允许 `origin=user`，服务端固定 drive 映射 |
 | `xinchao_event` | 回传一次明确互动及有界窗口状态；`event_id` 用于幂等 |
 | `xinchao_handoff_note` | 保存限时近期进度摘要，不保存整段聊天原文 |
 
@@ -133,11 +136,13 @@ Authorization: Bearer <SERVICE_TOKEN>
 | --- | --- | --- |
 | `GET` | `/health` | 健康状态与版本 |
 | `GET` | `/v1/state` | 读取完整动态状态 |
+| `GET` | `/v1/libido-snapshot` | 只读 `{ libido }`，供 DSM 受限调整刺激灵敏度 |
 | `GET` | `/v1/intent` | 读取当前意图 |
 | `GET` | `/v1/breath-context` | 获取紧凑梦境余韵 |
 | `GET` | `/v1/context` | 获取 Context Envelope |
 | `POST` | `/v1/settle` | 执行状态结算 |
 | `POST` | `/v1/conversation-event` | 写入一次明确互动事件 |
+| `POST` | `/v1/state-signal` | 写入 DSM 已确认的受限点火信号；不接受 drive delta |
 | `POST` | `/v1/heartbeat` | 只刷新在场时间，不上传聊天正文 |
 | `POST` | `/v1/handoff-note` | 保存短期交接摘要 |
 | `POST` | `/v1/drive-feedback` | 管理端受控反馈接口 |
@@ -236,7 +241,7 @@ CONTEXT_OMBRE_ENABLED=false
 - Context audit 只记录摘要与交付元数据。
 - Dashboard 使用与服务密钥不同的访问口令，并只签发 HttpOnly、SameSite 会话 Cookie。
 - Dashboard 默认隐藏梦境摘要和余韵文字；需要由自托管者显式开启。
-- `xinchao_event` 不接受聊天正文；交接便签也只应保存脱水后的近期进度。
+- `xinchao_event` 与 `/v1/state-signal` 都不接受聊天正文或客户端 drive delta；交接便签也只应保存脱水后的近期进度。
 - 公开部署前请阅读 [SECURITY.md](SECURITY.md)。
 
 ## 测试

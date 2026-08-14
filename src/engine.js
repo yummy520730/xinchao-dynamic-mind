@@ -7,6 +7,7 @@ const iso = (value) => new Date(value).toISOString();
 const SESSION_TONES = new Set(['neutral', 'calm', 'warm', 'guarded', 'conflicted', 'focused', 'playful', 'tired']);
 const SESSION_FIELDS = ['warmth', 'tension', 'attention', 'confidence'];
 const MAX_RECENT_CONVERSATION_EVENTS = 256;
+const MAX_RECENT_STATE_SIGNALS = 256;
 const MAX_RECENT_DREAMS = 20;
 const ARRIVAL_DECAY = 0.99;
 const RESONANCE_MIN_AFFINITY = 0.5;
@@ -24,6 +25,14 @@ export const INTERACTION_TYPES = Object.freeze([
   'reconciliation',
   'reassurance',
 ]);
+
+export const STATE_SIGNAL_TYPES = Object.freeze(['intimacy_cue']);
+
+// State signals are ignition inputs, not completed interactions.  Clients may
+// choose only a semantic type; drive math stays private to the engine.
+const STATE_SIGNAL_EFFECTS = Object.freeze({
+  intimacy_cue: Object.freeze({ increase: { libido: 0.08, crave: 0.06, possess: 0.02 } }),
+});
 
 const INTERACTION_EFFECTS = Object.freeze({
   companionship: { relief: { monitor: 0.06, social: 0.05 } },
@@ -52,6 +61,10 @@ function ensureStateShape(state) {
     );
   }
   state.interactionUsage ??= {};
+  state.recentStateSignals = Array.isArray(state.recentStateSignals)
+    ? state.recentStateSignals.slice(-MAX_RECENT_STATE_SIGNALS)
+    : [];
+  state.stateSignalUsage ??= {};
   state.handoffNotes = Array.isArray(state.handoffNotes) ? state.handoffNotes : [];
   state.arrivalHistogram = Array.isArray(state.arrivalHistogram) && state.arrivalHistogram.length === 24
     ? state.arrivalHistogram.map((value) => Number(value) || 0)
@@ -62,7 +75,7 @@ function ensureStateShape(state) {
   if (previousSchemaVersion < 9) {
     state.recentDreams = collapseDuplicateDreamHistory(state.recentDreams);
   }
-  state.schemaVersion = Math.max(11, previousSchemaVersion);
+  state.schemaVersion = Math.max(12, previousSchemaVersion);
   return state;
 }
 
@@ -98,6 +111,16 @@ function interactionType(event) {
   return INTERACTION_TYPES.includes(value) ? value : '';
 }
 
+function stateSignalType(event) {
+  const value = String(event?.signalType ?? event?.signal_type ?? '').trim().toLowerCase();
+  return STATE_SIGNAL_TYPES.includes(value) ? value : '';
+}
+
+function stateSignalOrigin(event) {
+  const value = String(event?.origin ?? '').trim().toLowerCase();
+  return value === 'user' ? value : '';
+}
+
 function interactionAlreadyProcessed(state, eventId) {
   const fingerprint = eventFingerprint(eventId);
   return Boolean(
@@ -117,6 +140,95 @@ function recordConversationEventFingerprint(state, eventId, type, now) {
       processedAt: iso(now),
     },
   ].slice(-MAX_RECENT_CONVERSATION_EVENTS);
+}
+
+function stateSignalAlreadyProcessed(state, eventId) {
+  const fingerprint = eventFingerprint(eventId);
+  return Boolean(
+    fingerprint
+    && state.recentStateSignals.some((item) => item?.eventFingerprint === fingerprint),
+  );
+}
+
+function recordStateSignalFingerprint(state, eventId, type, origin, now, reasonCode) {
+  const fingerprint = eventFingerprint(eventId);
+  if (!fingerprint) return;
+  state.recentStateSignals = [
+    ...state.recentStateSignals,
+    {
+      eventFingerprint: fingerprint,
+      signalType: type,
+      origin,
+      processedAt: iso(now),
+      reasonCode,
+    },
+  ].slice(-MAX_RECENT_STATE_SIGNALS);
+}
+
+function stateSignalResult(type, origin, applied, reasonCode, affectedDrives = []) {
+  return { type: type || null, origin: origin || null, applied, reasonCode, affectedDrives };
+}
+
+export function applyStateSignal(input, event = {}, now = new Date(), options = {}) {
+  const state = ensureStateShape(structuredClone(input));
+  const eventId = cleanEventId(event);
+  const type = stateSignalType(event);
+  const origin = stateSignalOrigin(event);
+  if (!eventId) {
+    return { state, changed: false, duplicate: false, signal: stateSignalResult(type, origin, false, 'missing_event_id') };
+  }
+  if (!type || !origin) {
+    return { state, changed: false, duplicate: false, signal: stateSignalResult(type, origin, false, 'unsupported_signal') };
+  }
+  if (stateSignalAlreadyProcessed(state, eventId)) {
+    return { state, changed: false, duplicate: true, signal: stateSignalResult(type, origin, false, 'duplicate_event') };
+  }
+
+  const timeZone = options.timeZone ?? 'Asia/Shanghai';
+  const { day } = localDayAndHour(now, timeZone);
+  const dailyUsed = Number(state.stateSignalUsage[day] ?? 0);
+  const maxPerDay = clamp(Number(options.maxPerDay ?? 12), 1, 96);
+  const windowMinutes = clamp(Number(options.windowMinutes ?? 10), 1, 1440);
+  const maxPerWindow = clamp(Number(options.maxPerWindow ?? 3), 1, 24);
+  const windowStart = now.getTime() - windowMinutes * 60_000;
+  const windowUsed = state.recentStateSignals.filter((item) => {
+    const processedAt = Date.parse(item?.processedAt ?? '');
+    return item?.reasonCode === 'applied' && Number.isFinite(processedAt) && processedAt >= windowStart;
+  }).length;
+  let reasonCode = 'applied';
+  if (dailyUsed >= maxPerDay) reasonCode = 'daily_signal_limit';
+  else if (windowUsed >= maxPerWindow) reasonCode = 'short_window_signal_limit';
+
+  const affectedDrives = [];
+  if (reasonCode === 'applied') {
+    for (const [key, baseIncrease] of Object.entries(STATE_SIGNAL_EFFECTS[type].increase)) {
+      const dimension = DIMENSIONS[key];
+      if (!dimension || !DRIVE_KEYS.includes(key)) continue;
+      const ceiling = Number(dimension.ceiling ?? SATURATE_CEIL);
+      const current = Number(state.drives[key] ?? 0);
+      const headroomRatio = clamp((ceiling - current) / Math.max(ceiling, 0.01), 0, 1);
+      state.drives[key] = Number(clamp(current + Number(baseIncrease) * headroomRatio, 0, ceiling).toFixed(4));
+      affectedDrives.push(key);
+    }
+    state.stateSignalUsage[day] = dailyUsed + 1;
+    state.stateSignalUsage = Object.fromEntries(
+      Object.entries(state.stateSignalUsage).sort(([left], [right]) => right.localeCompare(left)).slice(0, 14),
+    );
+  }
+  recordStateSignalFingerprint(state, eventId, type, origin, now, reasonCode);
+  state.revision += 1;
+  return {
+    state,
+    changed: true,
+    duplicate: false,
+    signal: stateSignalResult(type, origin, reasonCode === 'applied', reasonCode, affectedDrives),
+  };
+}
+
+export function settleAndApplyStateSignal(input, event = {}, now = new Date(), options = {}) {
+  const settled = settleState(input, now, options.sleepAfterMinutes ?? 90, options.settle ?? {});
+  const applied = applyStateSignal(settled.state, event, now, options.stateSignal ?? options);
+  return { ...applied, settled };
 }
 
 function applyInteractionOutcome(state, type, now, options = {}) {
@@ -208,7 +320,7 @@ function applySessionOverlay(state, event, now) {
 export function newState(now = new Date()) {
   const at = iso(now);
   return {
-    schemaVersion: 11,
+    schemaVersion: 12,
     revision: 0,
     consciousness: 'awake',
     lastConversationAt: at,
@@ -237,6 +349,8 @@ export function newState(now = new Date()) {
     contextDeliveries: {},
     recentConversationEvents: [],
     interactionUsage: {},
+    recentStateSignals: [],
+    stateSignalUsage: {},
     arrivalHistogram: Array.from({ length: 24 }, () => 0),
   };
 }

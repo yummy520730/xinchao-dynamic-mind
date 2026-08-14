@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { loadConfig, validateConfig } from './config.js';
-import { INTERACTION_TYPES, applyDriveFeedback, applyLongingNudge, applyMemoryResonance, applyOmbreHeartbeat, applyOutputReflux, barkAllowed, breathDreamContext, computeLonging, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, dreamDuplicateCheck, dreamMaterialFingerprint, newState, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, recordDreamAttempt, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleState, topDrives } from './engine.js';
+import { INTERACTION_TYPES, applyDriveFeedback, applyLongingNudge, applyMemoryResonance, applyOmbreHeartbeat, applyOutputReflux, barkAllowed, breathDreamContext, computeLonging, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, dreamDuplicateCheck, dreamMaterialFingerprint, newState, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, recordDreamAttempt, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleAndApplyStateSignal, settleState, topDrives } from './engine.js';
 import { selectUniqueBark } from './bark-dedupe.js';
 import { StateStore } from './state-store.js';
 import { ModelClient } from './model-client.js';
@@ -47,7 +47,7 @@ const fromMeStore = new FromMeStore(config.fromMe.statePath, config.fromMe);
 const bridgeStreams = new Set();
 await oauth.init();
 let cyclePromise = null;
-const SYSTEM_VERSION = '2.5.12-lmc.1';
+const SYSTEM_VERSION = '2.5.14-lmc.1';
 
 function log(event, fields = {}) {
   console.log(JSON.stringify({ at: new Date().toISOString(), event, ...fields }));
@@ -638,6 +638,51 @@ async function recordConversationEvent(event, source = 'api', now = new Date()) 
   };
 }
 
+function stateSignalFromHttp(payload = {}) {
+  const allowedKeys = new Set(['event_id', 'eventId', 'signal_type', 'signalType', 'origin']);
+  const unexpected = Object.keys(payload).filter((key) => !allowedKeys.has(key));
+  if (unexpected.length) throw new Error('state signal payload contains unsupported fields');
+  const eventId = String(payload.event_id ?? payload.eventId ?? '').trim();
+  const signalType = String(payload.signal_type ?? payload.signalType ?? '').trim().toLowerCase();
+  const origin = String(payload.origin ?? '').trim().toLowerCase();
+  if (!eventId || eventId.length > 120) throw new Error('event_id must contain 1 to 120 characters');
+  if (signalType !== 'intimacy_cue') throw new Error('signal_type is not supported');
+  if (origin !== 'user') throw new Error('origin is not supported');
+  return { eventId, signalType, origin };
+}
+
+async function recordStateSignal(event, source = 'api', now = new Date()) {
+  let applied;
+  const auditDetails = {};
+  const state = await updateState({
+    type: 'state_signal',
+    source,
+    eventId: auditEventFingerprint(event.eventId ?? event.event_id),
+    details: auditDetails,
+    at: now,
+  }, (current) => {
+    applied = settleAndApplyStateSignal(current, event, now, {
+      sleepAfterMinutes: config.sleepAfterMinutes,
+      settle: config.settle,
+      stateSignal: config.stateSignal,
+    });
+    Object.assign(auditDetails, {
+      changed: applied.changed,
+      duplicate: applied.duplicate,
+      signalType: applied.signal?.type,
+      signalApplied: applied.signal?.applied,
+      reasonCode: applied.signal?.reasonCode,
+    });
+    return applied.state;
+  });
+  return {
+    revision: state.revision,
+    duplicate: applied.duplicate,
+    signal: applied.signal,
+    settledHours: Number(applied.settled.elapsedHours.toFixed(4)),
+  };
+}
+
 async function saveHandoffNote(note, source = 'mcp', now = new Date()) {
   let applied;
   const state = await updateState({
@@ -899,6 +944,7 @@ const server = createServer(async (request, response) => {
             settledHours: result.settledHours,
           };
         },
+        stateSignal: async (event) => recordStateSignal(event, 'mcp'),
         handoffNote: async (note) => saveHandoffNote(note, 'mcp'),
         fromMe: async (entry) => {
           const result = await fromMeStore.add(entry);
@@ -943,6 +989,10 @@ const server = createServer(async (request, response) => {
       const result = await fromMeStore.add(await body(request));
       return send(response, result.duplicate ? 200 : 201, { id: result.item.id, kind: result.item.kind, duplicate: result.duplicate, expiresAt: result.item.expiresAt });
     }
+    if (request.method === 'POST' && url.pathname === '/v1/state-signal') {
+      const event = stateSignalFromHttp(await body(request));
+      return send(response, 200, await recordStateSignal(event, 'api'));
+    }
     if (request.method === 'POST' && url.pathname === '/v1/notification-test') {
       const pushed = await notifier.send(`心潮通知测试 · ${new Date().toLocaleString('zh-CN', { timeZone: config.settle.timeZone })}`);
       return send(response, 200, { ok: true, provider: notificationProvider, sent: pushed.sent });
@@ -955,6 +1005,12 @@ const server = createServer(async (request, response) => {
 
     if (request.method === 'GET' && url.pathname === '/v1/state') {
       return send(response, 200, await store.read());
+    }
+    if (request.method === 'GET' && url.pathname === '/v1/libido-snapshot') {
+      const state = await store.read();
+      const raw = Number(state?.drives?.libido ?? 0);
+      const libido = Number(Math.max(0, Math.min(1, Number.isFinite(raw) ? raw : 0)).toFixed(4));
+      return send(response, 200, { libido });
     }
     if (request.method === 'GET' && url.pathname === '/v1/breath-context') {
       const state = await store.read();

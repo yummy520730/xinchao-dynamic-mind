@@ -2,6 +2,18 @@
 
 本项目遵循语义化版本。除非特别说明，所有外部模型、长期记忆、OAuth 与通知能力均保持默认关闭。
 
+## 2.5.14-lmc.1 — 2026-08-13
+
+- 新增只读 `GET /v1/libido-snapshot`，仅返回 `{ libido }`，作为确定性状态机灵敏度的受限输入。
+- 不暴露完整 mind context、记忆、thoughts 或其他 drive；原有 state signal 点火与 completed intimacy 满足下降语义不变。
+
+## 2.5.13-lmc.1 — 2026-08-13
+
+- 新增受限、幂等的 `intimacy_cue` 点火入口：MCP `xinchao_state_signal` 与 HTTP `POST /v1/state-signal`。
+- cue 到 drive 的映射固定由心潮服务端控制，采用保守的 headroom 增量，并受每日与短窗口限流约束。
+- 保持 `xinchao_event(intimacy)` 为完成互动后的满足/下降语义；cue 永不进入该结算路径。
+- Context dynamic state 固定暴露紧凑的 `body_drives.crave/libido`，不改变 top drives 排名。
+
 ## 2.5.12-lmc.1 — 2026-08-10
 
 ### 从“心潮·念”选择性移植
