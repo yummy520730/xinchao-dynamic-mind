@@ -204,6 +204,42 @@ export class OmbreClient {
     const text = extractText(result);
     return text.match(/[a-f0-9]{12,}/i)?.[0] ?? null;
   }
+
+  async storeActionExperience(action) {
+    if (!this.config.writeEnabled) return null;
+    const eventId = String(action.eventId ?? action.event_id ?? '').trim();
+    if (!eventId) throw new Error('action experience requires eventId');
+    const stableFingerprint = createHash('sha256').update(eventId, 'utf8').digest('hex').slice(0, 24);
+    const kind = String(action.kind ?? 'action_result').trim().slice(0, 80);
+    const driveKey = String(action.driveKey ?? action.drive_key ?? '').trim().slice(0, 80);
+    const message = String(action.message ?? '').replace(/\s+/g, ' ').trim().slice(0, 1200);
+    const content = [
+      `心潮行动已完成：${kind}`,
+      driveKey ? `行动动机：${driveKey}` : '',
+      message ? `结果：${message}` : '',
+      '说明：这是已经发生的行动结果，不是待办、欲望或用户输入。',
+    ].filter(Boolean).join('\n');
+    if (this.config.transport === 'lmc5_bridge') {
+      const result = await this.bridgePost('/bridge/xinchao/candidates', {
+        external_id: `action:${stableFingerprint}`,
+        content_fingerprint: stableFingerprint,
+        title: `心潮行动完成 · ${kind}`,
+        content, category: 'episode', thread: 'reflection', importance: 6,
+        privacy_scope: 'personal', relation_terms: ['心潮', '已完成行动', kind, driveKey].filter(Boolean),
+      });
+      return String(result.candidate_id ?? '');
+    }
+    const result = await this.call(this.config.writeTool ?? 'hold', {
+      content,
+      tags: ['action_result', kind, driveKey].filter(Boolean).join(','),
+      importance: 6,
+      auto: true,
+      source: 'xinchao-action',
+      event_id: eventId,
+    });
+    const text = extractText(result);
+    return text.match(/[a-f0-9]{12,}/i)?.[0] ?? null;
+  }
 }
 
 function parseMcp(text) {

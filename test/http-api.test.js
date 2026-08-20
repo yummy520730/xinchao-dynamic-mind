@@ -179,6 +179,34 @@ test('POST /v1/handoff-note stores a bounded idempotent note for HTTP clients', 
   assert.ok(stateAfterCue.drives.libido > stateBeforeCue.drives.libido);
   assert.ok(stateAfterCue.drives.crave > stateBeforeCue.drives.crave);
 
+  const actionResultRequest = () => fetch(`${baseUrl}/v1/from-me`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      event_id: 'http-action-result-1', kind: 'action_result', drive_key: 'crave', message: '已经完成这次靠近。',
+    }),
+  });
+  const actionResult = await actionResultRequest();
+  assert.equal(actionResult.status, 201);
+  const actionPayload = await actionResult.json();
+  assert.equal(actionPayload.satisfaction.applied, true);
+  assert.equal(actionPayload.satisfaction.drive, 'crave');
+  const stateAfterAction = await (await fetch(`${baseUrl}/v1/state`, {
+    headers: { authorization: `Bearer ${token}` },
+  })).json();
+  assert.ok(stateAfterAction.drives.crave < stateAfterCue.drives.crave);
+
+  const repeatedAction = await actionResultRequest();
+  assert.equal(repeatedAction.status, 200);
+  const repeatedActionPayload = await repeatedAction.json();
+  assert.equal(repeatedActionPayload.duplicate, true);
+  assert.equal(repeatedActionPayload.satisfaction.duplicate, true);
+  const stateAfterRepeatedAction = await (await fetch(`${baseUrl}/v1/state`, {
+    headers: { authorization: `Bearer ${token}` },
+  })).json();
+  assert.equal(stateAfterRepeatedAction.drives.crave, stateAfterAction.drives.crave);
+  assert.equal(stateAfterRepeatedAction.recentActions.length, 1);
+
   const directSignalDelta = await fetch(`${baseUrl}/v1/state-signal`, {
     method: 'POST',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },

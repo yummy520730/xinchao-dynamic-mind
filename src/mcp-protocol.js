@@ -1,3 +1,5 @@
+import { DRIVE_KEYS } from './dimensions.js';
+
 const SUPPORTED_PROTOCOLS = new Set(['2025-03-26', '2025-06-18']);
 const INTERACTION_TYPES = new Set([
   'companionship',
@@ -98,7 +100,7 @@ export const XINCHAO_TOOLS = [
     title: '回传心潮窗口事件',
     description: [
       '回传一次明确的人机互动，并更新当前窗口短状态。',
-      '它会先结算事件发生前的时间增长，再唤醒心潮；可用受限互动类型触发服务端固定的欲望反馈。',
+      '它会先观察事件发生前的外部时间，再唤醒心潮；外部时间本身不会累计主观 drive。',
       '只在真实完成且结果明确的互动后调用；interaction_type 必须填写，不确定时不要调用本工具。',
       '不要提交聊天正文；客户端不能直接填写欲望数值，也不会修改 OB 长期记忆。',
     ].join(''),
@@ -215,6 +217,7 @@ export const XINCHAO_TOOLS = [
     description: [
       '仅当你独立产生了想留给用户的话、思念内容或行动结果时调用。',
       '这不是用户代写入口；不要因为页面提示而虚构主动消息，也不要提交聊天原文。',
+      'kind=action_result 表示行动已经完成，必须提交引出该行动的 drive_key；服务端会幂等地完成 satisfaction。',
       '相同 event_id 的重试不会重复保存。',
     ].join(''),
     inputSchema: {
@@ -222,6 +225,7 @@ export const XINCHAO_TOOLS = [
       properties: {
         event_id: { type: 'string', minLength: 8, maxLength: 120 },
         kind: { type: 'string', enum: ['longing_content', 'action_result', 'pending_from_me'], default: 'pending_from_me' },
+        drive_key: { type: 'string', enum: [...DRIVE_KEYS], description: 'action_result 必填；引出已完成行动的 drive。' },
         message: { type: 'string', minLength: 1, maxLength: 1200 },
         ttl_hours: { type: 'integer', minimum: 1, maximum: 720, default: 168 },
       },
@@ -333,9 +337,15 @@ function handoffNoteArgs(args = {}, fallbackSessionId = '') {
 }
 
 function fromMeArgs(args = {}) {
+  const kind = String(args.kind ?? 'pending_from_me').trim();
+  const driveKey = String(args.drive_key ?? '').trim();
+  if (kind === 'action_result' && !DRIVE_KEYS.includes(driveKey)) {
+    throw new Error('action_result 必须填写有效的 drive_key');
+  }
   return {
     eventId: String(args.event_id ?? '').trim().slice(0, 120),
-    kind: String(args.kind ?? 'pending_from_me').trim(),
+    kind,
+    driveKey,
     message: String(args.message ?? '').replace(/\s+/g, ' ').trim().slice(0, 1200),
     ttlHours: Math.max(1, Math.min(720, numberOr(args.ttl_hours, 168))),
   };

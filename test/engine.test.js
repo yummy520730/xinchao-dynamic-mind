@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activeSessionOverlay, applyConversationEvent, applyDriveFeedback, applyMemoryResonance, applyOmbreHeartbeat, applyStateSignal, barkAllowed, barkDuplicateCheck, barkMessageSimilarity, breathDreamContext, computeLonging, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, dreamDuplicateCheck, dreamMaterialFingerprint, newState, proactiveBarkAllowed, recentBarkHistory, recordBark, recordDaytimeEmergence, recordDream, recordDreamAttempt, scheduleDaytimeEmergence, sharesLongFragment, settleAndApplyConversationEvent, settleState } from '../src/engine.js';
+import { activeSessionOverlay, applyConversationEvent, applyDriveFeedback, applyMemoryResonance, applyOmbreHeartbeat, applyStateSignal, barkAllowed, barkDuplicateCheck, barkMessageSimilarity, breathDreamContext, completeAction, computeLonging, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, dreamDuplicateCheck, dreamMaterialFingerprint, newState, observeSilenceThreshold, proactiveBarkAllowed, recentBarkHistory, recordBark, recordDaytimeEmergence, recordDream, recordDreamAttempt, scheduleDaytimeEmergence, sharesLongFragment, settleAndApplyConversationEvent, settleState } from '../src/engine.js';
 import { DIMENSIONS } from '../src/dimensions.js';
 
 test('idle time enters sleep and repeated settlement is idempotent at same instant', () => {
@@ -10,6 +10,26 @@ test('idle time enters sleep and repeated settlement is idempotent at same insta
   const second = settleState(first.state, new Date('2026-07-16T02:00:00Z'), 90);
   assert.equal(second.changed, false);
   assert.deepEqual(second.state.drives, first.state.drives);
+});
+
+test('wall-clock passage alone never mutates subjective drives, thoughts or fatigue', () => {
+  const start = new Date('2026-07-16T00:00:00Z');
+  const initial = newState(start);
+  initial.drives.monitor = 0.71;
+  initial.fatigue = 0.2;
+  initial.thoughtPool.flash.push({ key: 'share', text: '一件事', intensity: 0.9, age: 2 });
+  initial.thoughtPool.obsessions.push({ key: 'monitor', text: '近况', intensity: 0.9, feedbacks: 0 });
+  const subjective = {
+    drives: structuredClone(initial.drives),
+    fatigue: initial.fatigue,
+    thoughtPool: structuredClone(initial.thoughtPool),
+  };
+
+  const settled = settleState(initial, new Date('2026-07-16T12:00:00Z'), 90);
+  assert.equal(settled.state.consciousness, 'sleeping');
+  assert.deepEqual(settled.state.drives, subjective.drives);
+  assert.equal(settled.state.fatigue, subjective.fatigue);
+  assert.deepEqual(settled.state.thoughtPool, subjective.thoughtPool);
 });
 
 test('only an explicit conversation event wakes the state', () => {
@@ -70,7 +90,7 @@ test('Bark history spans message kinds and keeps only the latest eight sends', (
     if (index === 2) state = recordDaytimeEmergence(state, `message-${index}`, at);
     else state = recordBark(state, at, { kind: index % 2 ? 'dream' : 'autonomous_thought', message: `message-${index}` });
   }
-  assert.equal(state.schemaVersion, 12);
+  assert.equal(state.schemaVersion, 13);
   assert.deepEqual(recentBarkHistory(state).map((item) => item.message), ['message-1', 'message-2', 'message-3', 'message-4', 'message-5', 'message-6', 'message-7', 'message-8']);
   assert.deepEqual(new Set(recentBarkHistory(state).map((item) => item.kind)), new Set(['dream', 'daytime_emergence', 'autonomous_thought']));
 });
@@ -137,7 +157,7 @@ test('session overlays stay isolated while global drives remain shared', () => {
   assert.equal(state.drives.curiosity, 0.15);
 });
 
-test('conversation outcomes settle elapsed growth before applying bounded drive relief', () => {
+test('conversation outcomes observe elapsed time without growth, then apply bounded drive relief', () => {
   const start = new Date('2026-07-28T00:00:00Z');
   const now = new Date('2026-07-28T01:00:00Z');
   const result = settleAndApplyConversationEvent(newState(start), {
@@ -152,7 +172,7 @@ test('conversation outcomes settle elapsed growth before applying bounded drive 
   assert.equal(result.interaction.applied, true);
   assert.equal(result.interaction.type, 'sharing');
   assert.deepEqual(result.interaction.affectedDrives, ['share', 'social']);
-  assert.equal(result.state.drives.share, 0.16);
+  assert.equal(result.state.drives.share, 0.129);
   assert.equal(result.state.interactionUsage['2026-07-28'], 1);
 });
 
@@ -275,10 +295,64 @@ test('old state schemas migrate even when settlement time has not advanced', () 
   delete old.contextDeliveries;
   delete old.handoffNotes;
   const settled = settleState(old, now, 90);
-  assert.equal(settled.state.schemaVersion, 12);
+  assert.equal(settled.state.schemaVersion, 13);
   assert.deepEqual(settled.state.handoffNotes, []);
   assert.equal(settled.changed, true);
   assert.equal(settled.state.revision, 1);
+});
+
+test('silence thresholds are discrete observations and each anchor-threshold pair is idempotent', () => {
+  const start = new Date('2026-07-28T00:00:00Z');
+  const initial = newState(start);
+  const before = observeSilenceThreshold(initial, new Date('2026-07-28T01:59:00Z'), 2);
+  assert.equal(before.active, false);
+  assert.equal(before.crossed, false);
+
+  const crossed = observeSilenceThreshold(before.state, new Date('2026-07-28T03:00:00Z'), 2);
+  assert.equal(crossed.active, true);
+  assert.equal(crossed.crossed, true);
+  assert.equal(crossed.state.silenceObservations.length, 1);
+  assert.deepEqual(crossed.state.drives, initial.drives);
+  const longingAtCrossing = computeLonging(crossed.state, new Date('2026-07-28T03:00:00Z'));
+  assert.ok(longingAtCrossing > 0);
+
+  const repeated = observeSilenceThreshold(crossed.state, new Date('2026-07-28T04:00:00Z'), 2);
+  assert.equal(repeated.duplicate, true);
+  assert.equal(repeated.crossed, false);
+  assert.equal(repeated.state.revision, crossed.state.revision);
+  assert.equal(repeated.state.silenceObservations.length, 1);
+  assert.equal(
+    computeLonging(repeated.state, new Date('2026-07-29T12:00:00Z')),
+    longingAtCrossing,
+  );
+
+  const higher = observeSilenceThreshold(repeated.state, new Date('2026-07-28T04:00:00Z'), 4);
+  assert.equal(higher.crossed, true);
+  assert.equal(higher.state.silenceObservations.length, 2);
+  assert.deepEqual(higher.state.drives, initial.drives);
+  assert.ok(computeLonging(higher.state) > longingAtCrossing);
+});
+
+test('completed actions satisfy the motivating drive exactly once', () => {
+  const now = new Date('2026-07-28T04:00:00Z');
+  const initial = newState(now);
+  initial.drives.share = 0.8;
+  const first = completeAction(initial, {
+    eventId: 'action-share-0001', kind: 'autonomous_thought', driveKey: 'share',
+  }, now, 0.25);
+  assert.equal(first.applied, true);
+  assert.equal(first.before, 0.8);
+  assert.equal(first.after, 0.6);
+  assert.equal(first.decrease, 0.2);
+
+  const repeated = completeAction(first.state, {
+    eventId: 'action-share-0001', kind: 'autonomous_thought', driveKey: 'share',
+  }, new Date('2026-07-28T04:01:00Z'), 0.25);
+  assert.equal(repeated.duplicate, true);
+  assert.equal(repeated.applied, false);
+  assert.equal(repeated.state.drives.share, 0.6);
+  assert.equal(repeated.state.revision, first.state.revision);
+  assert.equal(repeated.state.recentActions.length, 1);
 });
 
 test('dream fingerprints reject repeated scenes and skipped dreams keep the interval gate', () => {

@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { loadConfig, validateConfig } from './config.js';
-import { INTERACTION_TYPES, applyDriveFeedback, applyLongingNudge, applyMemoryResonance, applyOmbreHeartbeat, applyOutputReflux, barkAllowed, breathDreamContext, computeLonging, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, dreamDuplicateCheck, dreamMaterialFingerprint, newState, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, recordDreamAttempt, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleAndApplyStateSignal, settleState, topDrives } from './engine.js';
+import { INTERACTION_TYPES, applyDriveFeedback, applyMemoryResonance, applyOmbreHeartbeat, barkAllowed, breathDreamContext, completeAction, daytimeEmergenceAllowed, dreamAllowed, dreamDuplicateCheck, dreamMaterialFingerprint, newState, observeSilenceThreshold, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, recordDreamAttempt, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleAndApplyStateSignal, settleState, topDrives } from './engine.js';
 import { selectUniqueBark } from './bark-dedupe.js';
 import { StateStore } from './state-store.js';
 import { ModelClient } from './model-client.js';
@@ -121,24 +121,33 @@ async function runCycle() {
     let dreamCreated = false;
     let barkSent = false;
     let daytimeSent = false;
-    if (config.longing.enabled) {
-      const longing = computeLonging(state, now, {
-        timeZone: config.settle.timeZone,
-        ...config.longing,
+    let dreamSilence;
+    let proactiveSilence;
+    state = await updateState({
+      type: 'silence_observed',
+      source: 'wake',
+      at: now,
+      details: {
+        dreamThresholdHours: config.heartbeat.dreamMinIdleHours,
+        proactiveThresholdHours: config.heartbeat.proactiveMinIdleHours,
+      },
+    }, (latest) => {
+      dreamSilence = observeSilenceThreshold(latest, now, config.heartbeat.dreamMinIdleHours);
+      proactiveSilence = observeSilenceThreshold(dreamSilence.state, now, config.heartbeat.proactiveMinIdleHours);
+      return proactiveSilence.state;
+    });
+    if (dreamSilence.crossed || proactiveSilence.crossed) {
+      log('silence_threshold_crossed', {
+        thresholds: [dreamSilence, proactiveSilence].filter((item) => item.crossed).map((item) => item.thresholdHours),
+        revision: state.revision,
       });
-      const preview = applyLongingNudge(state, longing, now, config.longing);
-      if (preview.changed) {
-        state = await updateState({
-          type: 'longing_nudge', source: 'rhythm', at: now,
-          details: { longing, applied: preview.applied },
-        }, (latest) => applyLongingNudge(latest, longing, now, config.longing).state);
-        log('longing_nudge', { longing, applied: preview.applied, revision: state.revision });
-      }
     }
-    // Dream residue follows a short quiet period; autonomous contact remains
-    // reserved for a genuine long absence.
-    const dreamContactIsIdle = contactIdleAllowed(state, now, config.heartbeat.dreamMinIdleHours);
-    const proactiveContactIsIdle = contactIdleAllowed(state, now, config.heartbeat.proactiveMinIdleHours);
+    const dreamContactIsIdle = dreamSilence.active;
+    const proactiveContactIsIdle = proactiveSilence.active;
+    // One wake gets one stochastic intent evaluation. Later observations in
+    // this cycle may enrich context, but cannot cause repeated re-rolling.
+    const evaluatedDrive = pickIntent(state);
+    const evaluateDriveOnce = () => evaluatedDrive;
 
     if (dreamAllowed(state, now, config.dreamMinIntervalHours, config.dreamMaxPerDay)) {
       let material = '';
@@ -226,13 +235,13 @@ async function runCycle() {
             state,
             onRejected: ({ attempt, similarity }) => log('bark_duplicate_rejected', { kind: 'dream', attempt, similarity }),
             generate: async ({ recentMessages, rejectedMessage }) => {
-              if (modelFailed) return dream.residue;
+              if (modelFailed) return '';
               try {
                 return await model.generateDreamPush({ dream, recentMessages, rejectedMessage });
               } catch (error) {
                 modelFailed = true;
                 log('dream_push_model_failed', { message: error.message });
-                return dream.residue;
+                return '';
               }
             },
           });
@@ -250,14 +259,14 @@ async function runCycle() {
               }, (latest) => recordBark(latest, now, { kind: 'dream', message: selected.message }));
               barkSent = true;
               log('bark_sent', { kind: 'dream', revision: state.revision });
-              if (config.reflux.enabled) {
-                const expressed = topDrives(state, 1)[0];
-                if (expressed) {
-                  state = await updateState({
-                    type: 'output_reflux', source: notificationProvider, at: now,
-                    details: { kind: 'dream', drive: expressed.key },
-                  }, (latest) => applyOutputReflux(latest, expressed.key, selected.message, now, config.reflux.amount).state);
-                }
+              const motivation = evaluateDriveOnce();
+              if (motivation) {
+                const completed = await recordCompletedAction({
+                  eventId: notificationActionEventId('dream', selected.message),
+                  kind: 'dream', driveKey: motivation.key, message: selected.message,
+                  source: notificationProvider, now,
+                });
+                state = completed.state;
               }
             }
           }
@@ -273,13 +282,13 @@ async function runCycle() {
           state,
           onRejected: ({ attempt, similarity }) => log('bark_duplicate_rejected', { kind: 'autonomous_thought', attempt, similarity }),
           generate: async ({ recentMessages, rejectedMessage }) => {
-            if (modelFailed) return new ModelClient({ ...config.model, enabled: false }).fallbackThought(topDrives(state));
+            if (modelFailed) return { send: false, message: '', source: 'unavailable' };
             try {
               return await model.generateThought({ state, topDrives: topDrives(state), recentMessages, rejectedMessage });
             } catch (error) {
               modelFailed = true;
               log('thought_model_failed', { message: error.message });
-              return new ModelClient({ ...config.model, enabled: false }).fallbackThought(topDrives(state));
+              return { send: false, message: '', source: 'unavailable' };
             }
           },
         });
@@ -302,14 +311,14 @@ async function runCycle() {
             }, (latest) => recordBark(latest, now, { kind: 'autonomous_thought', message: selected.message }));
             barkSent = true;
             log('bark_sent', { kind: 'autonomous_thought', source: selected.candidate?.source, revision: state.revision });
-            if (config.reflux.enabled) {
-              const expressed = topDrives(state, 1)[0];
-              if (expressed) {
-                state = await updateState({
-                  type: 'output_reflux', source: notificationProvider, at: now,
-                  details: { kind: 'autonomous_thought', drive: expressed.key },
-                }, (latest) => applyOutputReflux(latest, expressed.key, selected.message, now, config.reflux.amount).state);
-              }
+            const motivation = evaluateDriveOnce();
+            if (motivation) {
+              const completed = await recordCompletedAction({
+                eventId: notificationActionEventId('autonomous_thought', selected.message),
+                kind: 'autonomous_thought', driveKey: motivation.key, message: selected.message,
+                source: notificationProvider, now,
+              });
+              state = completed.state;
             }
           }
         } catch (error) { log('bark_failed', { kind: 'autonomous_thought', message: error.message }); }
@@ -323,7 +332,7 @@ async function runCycle() {
         at: now,
       }, (latest) => scheduleDaytimeEmergence(latest, now, config.daytime.minIntervalHours, config.daytime.maxIntervalHours));
       log('daytime_emergence_scheduled', { nextAt: state.nextDaytimeEmergenceAt, revision: state.revision });
-    } else if (!config.shadowMode && config.daytime.enabled && config.ombre.readEnabled && notificationEnabled && daytimeEmergenceAllowed(state, now, config.daytime)) {
+    } else if (!barkSent && !config.shadowMode && config.daytime.enabled && config.ombre.readEnabled && notificationEnabled && daytimeEmergenceAllowed(state, now, config.daytime)) {
       let selected = { message: '', candidate: { source: 'none' }, reason: 'empty', attempts: 1 };
       try {
         const bundle = await ombre.daytimeMaterialBundle(topDrives(state));
@@ -362,14 +371,14 @@ async function runCycle() {
             }, (latest) => recordDaytimeEmergence(latest, selected.message, now, config.daytime.timeZone));
             daytimeSent = true;
             log('bark_sent', { kind: 'daytime_emergence', source: selected.candidate?.source, revision: state.revision });
-            if (config.reflux.enabled) {
-              const expressed = topDrives(state, 1)[0];
-              if (expressed) {
-                state = await updateState({
-                  type: 'output_reflux', source: notificationProvider, at: now,
-                  details: { kind: 'daytime_emergence', drive: expressed.key },
-                }, (latest) => applyOutputReflux(latest, expressed.key, selected.message, now, config.reflux.amount).state);
-              }
+            const motivation = evaluateDriveOnce();
+            if (motivation) {
+              const completed = await recordCompletedAction({
+                eventId: notificationActionEventId('daytime_emergence', selected.message),
+                kind: 'daytime_emergence', driveKey: motivation.key, message: selected.message,
+                source: notificationProvider, now,
+              });
+              state = completed.state;
             }
           }
         } catch (error) {
@@ -401,6 +410,77 @@ function auditEventFingerprint(value) {
   return eventId
     ? createHash('sha256').update(eventId, 'utf8').digest('hex').slice(0, 24)
     : '';
+}
+
+function notificationActionEventId(kind, message) {
+  const fingerprint = createHash('sha256')
+    .update(`${String(kind)}\n${String(message ?? '').trim()}`, 'utf8')
+    .digest('hex')
+    .slice(0, 32);
+  return `notification:${kind}:${fingerprint}`;
+}
+
+async function recordCompletedAction({ eventId, kind, driveKey, message, source, now = new Date() }) {
+  let satisfaction = null;
+  let state = await store.read();
+  const details = {};
+  state = await updateState({
+    type: 'action_satisfied',
+    source,
+    eventId: auditEventFingerprint(eventId),
+    details,
+    at: now,
+  }, (latest) => {
+    satisfaction = completeAction(latest, { eventId, kind, driveKey }, now, config.satisfaction.amount);
+    Object.assign(details, {
+      kind,
+      drive: driveKey,
+      applied: satisfaction.applied,
+      duplicate: satisfaction.duplicate,
+      decrease: satisfaction.decrease ?? 0,
+    });
+    return satisfaction.state;
+  });
+  let experienceStored = false;
+  if (config.ombre.writeEnabled) {
+    try {
+      await ombre.storeActionExperience({ eventId, kind, driveKey, message, completedAt: now.toISOString() });
+      experienceStored = true;
+    } catch (error) {
+      log('action_experience_write_failed', { kind, message: error.message });
+    }
+  }
+  return { state, satisfaction, experienceStored };
+}
+
+async function recordFromMe(entry, source = 'api', now = new Date()) {
+  const result = await fromMeStore.add(entry, now);
+  let completed = null;
+  if (result.item.kind === 'action_result') {
+    completed = await recordCompletedAction({
+      eventId: entry.eventId ?? entry.event_id,
+      kind: 'action_result',
+      driveKey: result.item.ai?.context?.drive,
+      message: result.item.human?.message ?? entry.message,
+      source,
+      now,
+    });
+  }
+  return {
+    id: result.item.id,
+    kind: result.item.kind,
+    duplicate: result.duplicate,
+    expiresAt: result.item.expiresAt,
+    satisfaction: completed?.satisfaction
+      ? {
+        applied: completed.satisfaction.applied,
+        duplicate: completed.satisfaction.duplicate,
+        drive: completed.satisfaction.key,
+        decrease: completed.satisfaction.decrease ?? 0,
+      }
+      : null,
+    experienceStored: completed?.experienceStored ?? false,
+  };
 }
 
 function authorized(request) {
@@ -946,10 +1026,7 @@ const server = createServer(async (request, response) => {
         },
         stateSignal: async (event) => recordStateSignal(event, 'mcp'),
         handoffNote: async (note) => saveHandoffNote(note, 'mcp'),
-        fromMe: async (entry) => {
-          const result = await fromMeStore.add(entry);
-          return { id: result.item.id, kind: result.item.kind, duplicate: result.duplicate, expiresAt: result.item.expiresAt };
-        },
+        fromMe: async (entry) => recordFromMe(entry, 'mcp'),
       });
       if (payload?.method === 'initialize' || payload?.method === 'tools/call') {
         log('mcp_request', {
@@ -986,8 +1063,8 @@ const server = createServer(async (request, response) => {
       }
     }
     if (request.method === 'POST' && url.pathname === '/v1/from-me') {
-      const result = await fromMeStore.add(await body(request));
-      return send(response, result.duplicate ? 200 : 201, { id: result.item.id, kind: result.item.kind, duplicate: result.duplicate, expiresAt: result.item.expiresAt });
+      const result = await recordFromMe(await body(request), 'api');
+      return send(response, result.duplicate ? 200 : 201, result);
     }
     if (request.method === 'POST' && url.pathname === '/v1/state-signal') {
       const event = stateSignalFromHttp(await body(request));

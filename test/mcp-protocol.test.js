@@ -212,3 +212,19 @@ test('xinchao_from_me is an AI-owned bounded outbox tool', async () => {
   assert.equal(result.body.result.isError, false);
   assert.equal(result.body.result.structuredContent.received.message, '等你回来。');
 });
+
+test('xinchao_from_me action results require a valid drive for satisfaction', async () => {
+  const missing = await handleMcpMessage({
+    jsonrpc:'2.0', id:21, method:'tools/call',
+    params:{ name:'xinchao_from_me', arguments:{ event_id:'action-result-0001', kind:'action_result', message:'已经分享。' } },
+  }, handlers());
+  assert.equal(missing.body.result.isError, true);
+  assert.match(missing.body.result.content[0].text, /drive_key/);
+
+  const accepted = await handleMcpMessage({
+    jsonrpc:'2.0', id:22, method:'tools/call',
+    params:{ name:'xinchao_from_me', arguments:{ event_id:'action-result-0001', kind:'action_result', drive_key:'share', message:'已经分享。' } },
+  }, handlers());
+  assert.equal(accepted.body.result.isError, false);
+  assert.equal(accepted.body.result.structuredContent.received.driveKey, 'share');
+});

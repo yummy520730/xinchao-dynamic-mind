@@ -1,5 +1,6 @@
 import { StateStore } from './state-store.js';
 import { createWakeBridgeEnvelope, consumeWakeBridgeEnvelope } from './wake-bridge-protocol.js';
+import { DRIVE_KEYS } from './dimensions.js';
 
 const ALLOWED_KINDS = new Set(['longing_content', 'action_result', 'pending_from_me']);
 
@@ -23,15 +24,20 @@ export class FromMeStore {
     if (!ALLOWED_KINDS.has(kind)) throw new Error('kind is not supported');
     const eventId = String(input.eventId ?? input.event_id ?? '').trim().slice(0, 120);
     const message = String(input.message ?? '').replace(/\s+/g, ' ').trim().slice(0, 1200);
+    const driveKey = String(input.driveKey ?? input.drive_key ?? '').trim();
     if (eventId.length < 8) throw new Error('event_id must contain at least 8 characters');
     if (!message) throw new Error('message is required');
+    if (kind === 'action_result' && !DRIVE_KEYS.includes(driveKey)) {
+      throw new Error('drive_key is required for action_result');
+    }
     let result;
     await this.store.update((state) => {
       this.prune(state, now);
       const existing = state.items.find((item) => item.dedupeKey === eventId);
       if (existing) { result = { item: existing, duplicate: true }; return state; }
       const item = createWakeBridgeEnvelope({
-        kind, audience: 'user', humanMessage: message, source: 'ai', dedupeKey: eventId,
+        kind, audience: kind === 'action_result' ? 'both' : 'user', humanMessage: message, source: 'ai', dedupeKey: eventId,
+        aiContext: driveKey ? { drive: driveKey } : {},
         ttlHours: Math.max(1, Math.min(720, Number(input.ttlHours ?? input.ttl_hours ?? this.ttlHours))), now,
       });
       state.items.push(item);

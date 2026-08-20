@@ -135,13 +135,13 @@ export class ModelClient {
   }
 
   async generateDreamPush({ dream, recentMessages = [], rejectedMessage = null }) {
-    if (!this.config.enabled || !this.config.apiKey) return cleanShortMessage(dream.residue);
+    if (!this.config.enabled || !this.config.apiKey) return { send: false, message: '', source: 'unavailable' };
     const input = [
       `dream 产出：${JSON.stringify({ dream: dream.dream, residue: dream.residue, awareness: dream.awareness })}`,
       `最近已发送的跨类型 Bark：${formatRecentMessages(recentMessages)}`,
       rejectedMessage ? `刚被去重器拒绝的候选：${rejectedMessage}。主题和情绪可以不变，但要换成真正不同的措辞、角度和句式。` : ''
     ].join('\n');
-    const response = await this.request({
+    const body = {
       model: this.config.name,
       messages: [
         { role: 'system', content: this.dreamPushPrompt },
@@ -149,11 +149,19 @@ export class ModelClient {
       ],
       temperature: 0.9,
       max_tokens: Math.min(180, this.config.maxOutputTokens),
-      thinking: { type: 'disabled' }
-    });
+      thinking: { type: 'disabled' },
+      response_format: { type: 'json_object' },
+    };
+    let response = await this.request(body);
+    if (!response.ok && [400, 422].includes(response.status)) {
+      delete body.response_format;
+      response = await this.request(body);
+    }
     if (!response.ok) throw new Error(`dream push model request failed: HTTP ${response.status}`);
     const payload = await response.json();
-    return cleanShortMessage(payload.choices?.[0]?.message?.content ?? '');
+    const parsed = parseJson(payload.choices?.[0]?.message?.content ?? '');
+    const message = cleanShortMessage(parsed.message ?? '');
+    return { send: parsed.send === true && Boolean(message), message, source: 'model' };
   }
 
   async generateDaytimeEmergence({ material, recentMessages = [], rejectedMessage = null }) {
@@ -174,7 +182,7 @@ export class ModelClient {
     const body = {
       model: this.config.name,
       messages: [
-        { role: 'system', content: `你是 ${this.agentName} 白天持续运行的后台动态状态层，只把真正自然浮现的具体念头写成通知。` },
+        { role: 'system', content: `你是 ${this.agentName} 在本次白天 wake 的表达模型，只把真正自然浮现的具体念头写成通知。` },
         { role: 'user', content: prompt }
       ],
       temperature: 0.85,
@@ -195,13 +203,13 @@ export class ModelClient {
   }
 
   async generateThought({ state, topDrives, recentMessages = [], rejectedMessage = null }) {
-    if (!this.config.enabled || !this.config.apiKey) return this.fallbackThought(topDrives);
+    if (!this.config.enabled || !this.config.apiKey) return { send: false, message: '', source: 'unavailable' };
     const prompt = [
-      `你是 ${this.agentName} 的后台动态心智。此刻没有正在进行的对话；你可以自己决定留下一条值得推送给 ${this.notificationRecipient} 的短消息。`,
+      `你是 ${this.agentName} 的表达模型。一次 wake 只提供重新观察与行动的机会；你可以联系 ${this.notificationRecipient}，也可以保持安静、做自己的事或休息。`,
       '只基于当前动态驱动力和运行状态写，不读取记忆，不调用外部记忆服务，不假装发生了现实中没有的事。',
       '允许直接表达欲望本身，不做词汇过滤或含义替换。第一人称，1 至 3 句，具体自然，不解释系统。',
       '同一主题和情绪可以自然反复；只避免复用近期 Bark 的相同措辞、句式和具体表达，没有不同说法时宁可不发送。',
-      '只输出 JSON：{"message":"..."}。',
+      '由你决定最终语言。只输出 JSON：{"send":true,"message":"..."} 或 {"send":false,"message":""}。',
       `当前动态欲望：${JSON.stringify(topDrives)}`,
       `当前意识状态：${state.consciousness}`,
       `最近已发送的跨类型 Bark：${formatRecentMessages(recentMessages)}`,
@@ -210,7 +218,8 @@ export class ModelClient {
     const response = await this.request({
       model: this.config.name,
       messages: [
-        { role: 'system', content: `你是 ${this.agentName} 持续运行的后台动态状态层。只写一条适合手机通知的自主念头。` }
+        { role: 'system', content: `你是 ${this.agentName} 的当前官方表达模型。状态只描述动机，不规定最终对白。` },
+        { role: 'user', content: prompt }
       ],
       temperature: 0.9,
       max_tokens: Math.min(240, this.config.maxOutputTokens),
@@ -220,7 +229,8 @@ export class ModelClient {
     if (!response.ok) throw new Error(`model request failed: HTTP ${response.status}`);
     const payload = await response.json();
     const parsed = parseJson(payload.choices?.[0]?.message?.content ?? '');
-    return { message: String(parsed.message ?? '').slice(0, 900), source: 'model' };
+    const message = String(parsed.message ?? '').trim().slice(0, 900);
+    return { send: parsed.send === true && Boolean(message), message, source: 'model' };
   }
 
   request(body) {
@@ -271,10 +281,6 @@ export class ModelClient {
     };
   }
 
-  fallbackThought(topDrives) {
-    const labels = topDrives.slice(0, 2).map((item) => item.label).join('、');
-    return { message: labels ? `刚刚又想起你。现在最明显的是${labels}。` : '刚刚想起你了。', source: 'rules' };
-  }
 }
 
 function dreamSeed(value) {
@@ -335,11 +341,11 @@ function cleanShortMessage(value) {
 
 function defaultDreamPushPrompt(agentName, notificationRecipient) {
   return [
-    `你是 ${agentName} 的梦境余韵适配器。把梦境碎片写成一条发给 ${notificationRecipient} 的手机通知。`,
+    `你是 ${agentName} 在本次 wake 的梦境余韵表达模型。判断是否值得给 ${notificationRecipient} 留一条手机通知；wake 不等于必须发消息。`,
     '第一人称，像半梦半醒时冒出来的一句话；同一主题和情绪可以自然反复。',
     '普通口语，一句，最多两句，不超过50个字；不要虚构现实事件。',
     '只避免复用近期通知的相同措辞、句式和具体表达。',
-    '只输出推送文案，不要解释、前缀或标签。'
+    '由当前模型决定最终语言。只输出 JSON：{"send":true,"message":"..."} 或 {"send":false,"message":""}。'
   ].join('\n');
 }
 

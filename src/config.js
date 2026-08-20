@@ -137,8 +137,6 @@ export function loadConfig() {
     },
     settle: {
       timeZone: process.env.SETTLE_TIME_ZONE ?? process.env.DAYTIME_TIME_ZONE ?? 'Asia/Shanghai',
-      dawnFreezeStart: number('DAWN_FREEZE_START', 1, 0, 12),
-      dawnFreezeEnd: number('DAWN_FREEZE_END', 8, 1, 12),
     },
     daytime: {
       enabled: bool('DAYTIME_EMERGENCE_ENABLED', false),
@@ -149,9 +147,8 @@ export function loadConfig() {
       maxIntervalHours: number('DAYTIME_MAX_INTERVAL_HOURS', 3, 0.25, 24),
       maxPerDay: number('DAYTIME_MAX_PER_DAY', 7, 1, 24)
     },
-    reflux: {
-      enabled: bool('OUTPUT_REFLUX_ENABLED', true),
-      amount: number('OUTPUT_REFLUX_AMOUNT', 0.30, 0.05, 0.6),
+    satisfaction: {
+      amount: number('ACTION_SATISFACTION_AMOUNT', number('OUTPUT_REFLUX_AMOUNT', 0.30, 0.05, 0.6), 0.05, 0.6),
     },
     resonance: {
       enabled: bool('MEMORY_RESONANCE_ENABLED', true),
@@ -161,13 +158,6 @@ export function loadConfig() {
     anticipation: {
       enabled: bool('ANTICIPATION_ENABLED', true),
       arrivalGapMinutes: number('ANTICIPATION_ARRIVAL_GAP_MINUTES', 90, 15, 720),
-    },
-    longing: {
-      enabled: bool('LONGING_ENABLED', true),
-      nudge: number('LONGING_NUDGE', 0.02, 0.005, 0.1),
-      cap: number('LONGING_CAP', 0.04, 0.01, 0.2),
-      onsetHours: number('LONGING_ONSET_HOURS', 6, 1, 48),
-      fullHours: number('LONGING_FULL_HOURS', 18, 2, 96),
     }
   };
 }

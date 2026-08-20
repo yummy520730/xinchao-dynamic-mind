@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { DIMENSIONS, DRIVE_KEYS, MEMORY_AFFINITY, SATURATE_CEIL, SATURATE_FLOOR } from './dimensions.js';
-import { newThoughtPool, tickThoughtPool, obsessionBonus, reinforceThought } from './thought-pool.js';
+import { DIMENSIONS, DRIVE_KEYS, MEMORY_AFFINITY, SATURATE_CEIL } from './dimensions.js';
+import { newThoughtPool, obsessionBonus } from './thought-pool.js';
 
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
 const iso = (value) => new Date(value).toISOString();
@@ -8,6 +8,8 @@ const SESSION_TONES = new Set(['neutral', 'calm', 'warm', 'guarded', 'conflicted
 const SESSION_FIELDS = ['warmth', 'tension', 'attention', 'confidence'];
 const MAX_RECENT_CONVERSATION_EVENTS = 256;
 const MAX_RECENT_STATE_SIGNALS = 256;
+const MAX_RECENT_ACTIONS = 256;
+const MAX_SILENCE_OBSERVATIONS = 64;
 const MAX_RECENT_DREAMS = 20;
 const ARRIVAL_DECAY = 0.99;
 const RESONANCE_MIN_AFFINITY = 0.5;
@@ -65,6 +67,12 @@ function ensureStateShape(state) {
     ? state.recentStateSignals.slice(-MAX_RECENT_STATE_SIGNALS)
     : [];
   state.stateSignalUsage ??= {};
+  state.recentActions = Array.isArray(state.recentActions)
+    ? state.recentActions.slice(-MAX_RECENT_ACTIONS)
+    : [];
+  state.silenceObservations = Array.isArray(state.silenceObservations)
+    ? state.silenceObservations.slice(-MAX_SILENCE_OBSERVATIONS)
+    : [];
   state.handoffNotes = Array.isArray(state.handoffNotes) ? state.handoffNotes : [];
   state.arrivalHistogram = Array.isArray(state.arrivalHistogram) && state.arrivalHistogram.length === 24
     ? state.arrivalHistogram.map((value) => Number(value) || 0)
@@ -75,7 +83,7 @@ function ensureStateShape(state) {
   if (previousSchemaVersion < 9) {
     state.recentDreams = collapseDuplicateDreamHistory(state.recentDreams);
   }
-  state.schemaVersion = Math.max(12, previousSchemaVersion);
+  state.schemaVersion = Math.max(13, previousSchemaVersion);
   return state;
 }
 
@@ -320,7 +328,7 @@ function applySessionOverlay(state, event, now) {
 export function newState(now = new Date()) {
   const at = iso(now);
   return {
-    schemaVersion: 12,
+    schemaVersion: 13,
     revision: 0,
     consciousness: 'awake',
     lastConversationAt: at,
@@ -351,6 +359,8 @@ export function newState(now = new Date()) {
     interactionUsage: {},
     recentStateSignals: [],
     stateSignalUsage: {},
+    recentActions: [],
+    silenceObservations: [],
     arrivalHistogram: Array.from({ length: 24 }, () => 0),
   };
 }
@@ -431,7 +441,7 @@ export function localDayAndHour(now, timeZone) {
   return { day: `${values.year}-${values.month}-${values.day}`, hour: Number(values.hour) };
 }
 
-// ── Settle (the heartbeat tick) ───────────────────────────────────
+// ── Environmental settlement ──────────────────────────────────────
 
 export function settleState(input, now = new Date(), sleepAfterMinutes = 90, options = {}) {
   const originalSchemaVersion = Number(input?.schemaVersion) || 0;
@@ -441,67 +451,10 @@ export function settleState(input, now = new Date(), sleepAfterMinutes = 90, opt
   let changed = elapsedHours > 0 || originalSchemaVersion < state.schemaVersion;
   if (pruneExpiredSessionOverlays(state, now) > 0) changed = true;
 
-  const timeZone = options.timeZone ?? 'Asia/Shanghai';
-  const { hour } = localDayAndHour(now, timeZone);
-
-  const dawnStart = options.dawnFreezeStart ?? 1;
-  const dawnEnd   = options.dawnFreezeEnd   ?? 8;
-  const isDawn    = hour >= dawnStart && hour < dawnEnd;
-  const isNight   = hour >= 22 || hour < 6;
-
-  const fatigueMultiplier = 1 - clamp(Number(state.fatigue ?? 0), 0, 0.3);
-
-  for (const key of DRIVE_KEYS) {
-    const dim = DIMENSIONS[key];
-    const current = Number(state.drives[key] ?? 0);
-
-    if (isDawn && dim.dawnFreeze) {
-      if (current !== Number(current.toFixed(4))) changed = true;
-      state.drives[key] = Number(current.toFixed(4));
-      continue;
-    }
-
-    const ceiling = clamp(Number(dim.ceiling ?? SATURATE_CEIL), 0.1, 1);
-    const floor = Math.min(ceiling, clamp(Number(dim.saturationFloor ?? SATURATE_FLOOR)));
-    let next;
-    if (current > ceiling) {
-      next = Math.max(ceiling, current - 0.12 * elapsedHours);
-    } else {
-      let rate = dim.growPerHour;
-      if (isNight && dim.nightMul !== undefined) rate *= dim.nightMul;
-      rate *= fatigueMultiplier;
-      const headroom = Math.max(0, 1 - current / ceiling);
-      const sleepDecay = state.consciousness === 'sleeping'
-        ? Number(dim.sleepDecayPerHour ?? 0.008) * Math.max(0, current - floor) * elapsedHours
-        : 0;
-      next = clamp(current + rate * headroom * elapsedHours - sleepDecay, 0, ceiling);
-    }
-
-    if (next !== current) changed = true;
-    state.drives[key] = Number(next.toFixed(4));
-  }
-
-  // Tick thought pool
-  state.thoughtPool ??= newThoughtPool();
-  const feedbacks = tickThoughtPool(state.thoughtPool);
-  for (const [key, amount] of Object.entries(feedbacks)) {
-    if (DRIVE_KEYS.includes(key)) {
-      const before = Number(state.drives[key]);
-      const ceiling = clamp(Number(DIMENSIONS[key].ceiling ?? SATURATE_CEIL), 0.1, 1);
-      state.drives[key] = Number(clamp(before + amount, 0, ceiling).toFixed(4));
-      if (state.drives[key] !== before) changed = true;
-    }
-  }
-
-  // Fatigue: slowly recovers during sleep, slowly builds during prolonged high-drive wakefulness
-  if (state.consciousness === 'sleeping') {
-    state.fatigue = Number(clamp(Number(state.fatigue ?? 0) - 0.02 * elapsedHours, 0, 0.3).toFixed(4));
-  } else {
-    const avgDrive = DRIVE_KEYS.reduce((sum, k) => sum + Number(state.drives[k]), 0) / DRIVE_KEYS.length;
-    if (avgDrive > 0.5) {
-      state.fatigue = Number(clamp(Number(state.fatigue ?? 0) + 0.005 * elapsedHours, 0, 0.3).toFixed(4));
-    }
-  }
+  // Wall-clock settlement owns only observable environment state. Drives,
+  // thoughts and fatigue may change only when an explicit event/wake evaluates
+  // new evidence; elapsed time alone is never a psychic accumulator.
+  void options;
 
   // Sleep transition
   const idleMinutes = Math.max(0, (nowMs - Date.parse(state.lastConversationAt)) / 60_000);
@@ -542,8 +495,8 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
   const wasSleeping = state.consciousness === 'sleeping';
   const previousConversationMs = Date.parse(input.lastConversationAt ?? '');
   // Presence-only heartbeats prove the user is around, nothing more. They must
-  // not wake the system, reset the conversation idle clock (longing/anticipation
-  // depend on it), or fabricate dream awareness — only lastHeartbeatAt moves.
+  // not wake the system, reset the conversation idle clock, or fabricate dream
+  // awareness — only the observable presence anchor moves.
   if (options.presenceOnly === true && !type) {
     state.lastHeartbeatAt = iso(now);
     state.revision += 1;
@@ -700,6 +653,57 @@ export function contactIdleAllowed(state, now, minIdleHours) {
     && now.getTime() - lastHeartbeatMs >= minIdleHours * 3_600_000;
 }
 
+export function observeSilenceThreshold(input, now = new Date(), thresholdHours = 2) {
+  const state = ensureStateShape(structuredClone(input));
+  const threshold = Math.max(0.25, Number(thresholdHours) || 2);
+  const anchorAt = state.lastHeartbeatAt ?? state.lastConversationAt;
+  const anchorMs = Date.parse(anchorAt ?? '');
+  const elapsedHours = Number.isFinite(anchorMs)
+    ? Math.max(0, (now.getTime() - anchorMs) / 3_600_000)
+    : 0;
+  const active = Number.isFinite(anchorMs) && elapsedHours >= threshold;
+  const fingerprint = active
+    ? eventFingerprint(`silence:${anchorAt}:${threshold}`)
+    : '';
+  const duplicate = Boolean(
+    fingerprint
+    && state.silenceObservations.some((item) => item?.eventFingerprint === fingerprint),
+  );
+  if (!active || duplicate) {
+    return {
+      state,
+      changed: false,
+      active,
+      crossed: false,
+      duplicate,
+      thresholdHours: threshold,
+      elapsedHours,
+      anchorAt: anchorAt ?? null,
+    };
+  }
+  state.silenceObservations = [
+    ...state.silenceObservations,
+    {
+      type: 'silence_threshold_crossed',
+      eventFingerprint: fingerprint,
+      thresholdHours: threshold,
+      anchorAt,
+      observedAt: iso(now),
+    },
+  ].slice(-MAX_SILENCE_OBSERVATIONS);
+  state.revision += 1;
+  return {
+    state,
+    changed: true,
+    active: true,
+    crossed: true,
+    duplicate: false,
+    thresholdHours: threshold,
+    elapsedHours,
+    anchorAt,
+  };
+}
+
 // ── Drive feedback ────────────────────────────────────────────────
 
 export function applyDriveFeedback(input, feedback = {}, now = new Date()) {
@@ -715,18 +719,47 @@ export function applyDriveFeedback(input, feedback = {}, now = new Date()) {
   return state;
 }
 
-// A message that was actually delivered can feed back into the thought pool.
-// It never directly edits drive values, avoiding a self-scoring loop.
-export function applyOutputReflux(input, driveKey, text = '', now = new Date(), amount = 0.30) {
+export function completeAction(input, action = {}, now = new Date(), amount = 0.30) {
   const state = ensureStateShape(structuredClone(input));
-  if (!DRIVE_KEYS.includes(driveKey)) {
-    return { state, applied: false, reasonCode: 'unknown_drive', key: driveKey || null };
+  const eventId = cleanEventId(action);
+  const driveKey = String(action.driveKey ?? action.drive_key ?? '').trim();
+  const kind = String(action.kind ?? 'action_result').trim().slice(0, 80);
+  if (!eventId) {
+    return { state, changed: false, duplicate: false, applied: false, reasonCode: 'missing_event_id' };
   }
-  state.thoughtPool ??= newThoughtPool();
-  const result = reinforceThought(state.thoughtPool, driveKey, text, amount);
+  if (!DRIVE_KEYS.includes(driveKey)) {
+    return { state, changed: false, duplicate: false, applied: false, reasonCode: 'unknown_drive', key: driveKey || null };
+  }
+  const fingerprint = eventFingerprint(eventId);
+  if (state.recentActions.some((item) => item?.eventFingerprint === fingerprint)) {
+    return { state, changed: false, duplicate: true, applied: false, reasonCode: 'duplicate_event', key: driveKey };
+  }
+  const satisfaction = clamp(Number(amount) || 0.30, 0.05, 0.95);
+  const before = Number(state.drives[driveKey] ?? 0);
+  const after = Number(clamp(before * (1 - satisfaction), 0, Number(DIMENSIONS[driveKey].ceiling ?? 1)).toFixed(4));
+  state.drives[driveKey] = after;
+  state.recentActions = [
+    ...state.recentActions,
+    {
+      eventFingerprint: fingerprint,
+      kind,
+      driveKey,
+      completedAt: iso(now),
+    },
+  ].slice(-MAX_RECENT_ACTIONS);
   state.lastSettledAt = iso(now);
   state.revision += 1;
-  return { state, applied: true, reasonCode: 'reinforced', key: driveKey, ...result };
+  return {
+    state,
+    changed: true,
+    duplicate: false,
+    applied: true,
+    reasonCode: 'satisfied',
+    key: driveKey,
+    before,
+    after,
+    decrease: Number((before - after).toFixed(4)),
+  };
 }
 
 // Recalled LMC metadata may gently resonate with drives.  Per-drive ceilings,
@@ -783,43 +816,15 @@ export function computeAnticipation(state, now = new Date(), options = {}) {
 }
 
 export function computeLonging(state, now = new Date(), options = {}) {
-  const histogram = Array.isArray(state?.arrivalHistogram) ? state.arrivalHistogram : [];
-  const total = histogram.reduce((sum, value) => sum + (Number(value) || 0), 0);
-  if (total < Number(options.minSamples ?? 8)) return 0;
-  const previous = Date.parse(state?.lastConversationAt ?? '');
-  if (!Number.isFinite(previous)) return 0;
-  const idleHours = Math.max(0, (now.getTime() - previous) / 3_600_000);
-  const onset = Number(options.onsetHours ?? 6);
-  const full = Number(options.fullHours ?? 18);
-  if (idleHours <= onset) return 0;
-  const byIdle = clamp((idleHours - onset) / Math.max(1, full - onset), 0, 1);
-  const { hour } = localDayAndHour(now, options.timeZone ?? 'Asia/Shanghai');
-  const probability = (value) => (Number(histogram[((value % 24) + 24) % 24]) || 0) / total;
-  const windowAt = (value) => probability(value) + 0.6 * probability(value + 1) + 0.3 * probability(value - 1);
-  const peak = Math.max(...Array.from({ length: 24 }, (_, index) => windowAt(index)));
-  if (peak <= 0) return 0;
-  const activeness = clamp(windowAt(hour) / peak, 0, 1);
-  if (activeness < Number(options.quietGate ?? 0.15)) return 0;
-  return Number((byIdle * activeness).toFixed(3));
-}
-
-export function applyLongingNudge(input, longing = 0, now = new Date(), options = {}) {
-  const state = ensureStateShape(structuredClone(input));
-  const ceiling = clamp(Number(DIMENSIONS.monitor.ceiling ?? SATURATE_CEIL), 0.1, 1);
-  const before = Number(state.drives.monitor ?? 0);
-  if (!(longing > 0) || before >= ceiling) return { state, applied: 0, changed: false };
-  const delta = Math.min(
-    clamp(Number(options.nudge ?? 0.02), 0, 0.1) * longing,
-    clamp(Number(options.cap ?? 0.04), 0, 0.2),
-    ceiling - before,
-  );
-  const after = Number((before + Math.max(0, delta)).toFixed(4));
-  state.drives.monitor = after;
-  if (after !== before) {
-    state.lastSettledAt = iso(now);
-    state.revision += 1;
-  }
-  return { state, applied: Number((after - before).toFixed(4)), changed: after !== before };
+  const anchorAt = state?.lastHeartbeatAt ?? state?.lastConversationAt;
+  const observedThreshold = (Array.isArray(state?.silenceObservations) ? state.silenceObservations : [])
+    .filter((item) => item?.type === 'silence_threshold_crossed' && item?.anchorAt === anchorAt)
+    .reduce((maximum, item) => Math.max(maximum, Number(item?.thresholdHours) || 0), 0);
+  if (observedThreshold <= 0) return 0;
+  const monitor = clamp(Number(state?.drives?.monitor ?? 0), 0, 1);
+  const fullThreshold = Math.max(1, Number(options.fullThresholdHours ?? 12));
+  void now;
+  return Number((monitor * clamp(observedThreshold / fullThreshold, 0, 1)).toFixed(3));
 }
 
 export function activeSessionOverlay(input, sessionId, now = new Date()) {
