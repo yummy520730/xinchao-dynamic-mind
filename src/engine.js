@@ -565,10 +565,10 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
   // Clients report semantic events only. Numeric deltas, self-selected
   // satisfaction and arbitrary thought text are intentionally ignored.
 
-  // Presence-only heartbeats are not semantic interactions. Keeping them out
-  // of this history prevents a healthy recall heartbeat from looking like a
-  // broken interaction with interactionType=null.
-  if (type) recordConversationEventFingerprint(state, eventId, type, now);
+  // Presence-only heartbeats are not semantic interactions and return earlier.
+  // Real conversation events — including presence with no interaction_type —
+  // keep event_id fingerprints so retries cannot replay wake/anchor effects.
+  if (eventId) recordConversationEventFingerprint(state, eventId, type, now);
   state.revision += 1;
   return {
     state,
@@ -845,6 +845,19 @@ export function topDrives(state, limit = 5) {
     .sort((a, b) => b[1] - a[1])
     .slice(0, limit)
     .map(([key, value]) => ({ key, label: DIMENSIONS[key].label, value }));
+}
+
+export function compactProjection(state, { duplicate = false } = {}) {
+  return {
+    revision: Number(state.revision ?? 0),
+    consciousness: state.consciousness ?? 'unknown',
+    fatigue: Number(state.fatigue ?? 0),
+    top_drives: topDrives(state, 3).map((drive) => ({
+      key: drive.key,
+      value: Number(drive.value),
+    })),
+    duplicate: Boolean(duplicate),
+  };
 }
 
 // ── Dream management ──────────────────────────────────────────────

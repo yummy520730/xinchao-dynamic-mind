@@ -2,6 +2,15 @@
 
 本项目遵循语义化版本。除非特别说明，所有外部模型、长期记忆、OAuth 与通知能力均保持默认关闭。
 
+## 2.5.15-lmc.1 — 2026-09-04
+
+- 新增 MCP 工具 `mind_presence`：UserPromptSubmit 在每个真实 user turn 开始时上报在场，不要求 `interaction_type`，不上传用户文本。
+- 服务端复用 conversation-event 的无 interaction 路径：settle 到当前时间、sleeping→awake、刷新 `lastConversationAt` 与 presence/heartbeat 锚点及 session overlay。
+- 不应用 `INTERACTION_EFFECTS`，不产生 satisfaction / drive relief。`event_id` 幂等，retry 不重复产生状态副作用。
+- 返回本次 presence 应用后的 compact projection：`revision`、`consciousness`、`fatigue`、`top_drives`、`duplicate`。`top_drives` 沿用现有引擎排序。
+- 现有 `xinchao_context` / `xinchao_event` contract 不变；Stop 侧已完成互动仍由 `xinchao_event` 负责，且必须使用不同 `event_id`。
+- 新增 `scripts/xinchao-presence-hook.sh`，把 UserPromptSubmit 从“只读旧 state”升级为 presence 上报并注入返回 projection。
+
 ## 2.5.14-lmc.1 — 2026-08-13
 
 - 新增只读 `GET /v1/libido-snapshot`，仅返回 `{ libido }`，作为确定性状态机灵敏度的受限输入。

@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { loadConfig, validateConfig } from './config.js';
-import { INTERACTION_TYPES, applyDriveFeedback, applyMemoryResonance, applyOmbreHeartbeat, barkAllowed, breathDreamContext, completeAction, daytimeEmergenceAllowed, dreamAllowed, dreamDuplicateCheck, dreamMaterialFingerprint, newState, observeSilenceThreshold, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, recordDreamAttempt, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleAndApplyStateSignal, settleState, topDrives } from './engine.js';
+import { INTERACTION_TYPES, applyDriveFeedback, applyMemoryResonance, applyOmbreHeartbeat, barkAllowed, breathDreamContext, compactProjection, completeAction, daytimeEmergenceAllowed, dreamAllowed, dreamDuplicateCheck, dreamMaterialFingerprint, newState, observeSilenceThreshold, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, recordDreamAttempt, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleAndApplyStateSignal, settleState, topDrives } from './engine.js';
 import { selectUniqueBark } from './bark-dedupe.js';
 import { StateStore } from './state-store.js';
 import { ModelClient } from './model-client.js';
@@ -47,7 +47,7 @@ const fromMeStore = new FromMeStore(config.fromMe.statePath, config.fromMe);
 const bridgeStreams = new Set();
 await oauth.init();
 let cyclePromise = null;
-const SYSTEM_VERSION = '2.5.14-lmc.1';
+const SYSTEM_VERSION = '2.5.15-lmc.1';
 
 function log(event, fields = {}) {
   console.log(JSON.stringify({ at: new Date().toISOString(), event, ...fields }));
@@ -707,12 +707,10 @@ async function recordConversationEvent(event, source = 'api', now = new Date()) 
     return applied.state;
   });
   return {
-    revision: state.revision,
-    consciousness: state.consciousness,
+    ...compactProjection(state, { duplicate: applied.duplicate }),
     pendingAwareness: state.pendingAwareness,
     sessionId: applied.sessionId || null,
     sessionCreated: applied.sessionCreated,
-    duplicate: applied.duplicate,
     interaction: applied.interaction,
     settledHours: Number(applied.settled.elapsedHours.toFixed(4)),
   };
@@ -1022,6 +1020,16 @@ const server = createServer(async (request, response) => {
             duplicate: result.duplicate,
             interaction: result.interaction,
             settledHours: result.settledHours,
+          };
+        },
+        presence: async (event) => {
+          const result = await recordConversationEvent(event, 'mcp');
+          return {
+            revision: result.revision,
+            consciousness: result.consciousness,
+            fatigue: result.fatigue,
+            top_drives: result.top_drives,
+            duplicate: result.duplicate,
           };
         },
         stateSignal: async (event) => recordStateSignal(event, 'mcp'),
