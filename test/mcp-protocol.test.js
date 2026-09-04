@@ -44,6 +44,13 @@ function handlers() {
         { key: 'curiosity', value: 0.69 },
         { key: 'crave', value: 0.66 },
       ],
+      session: {
+        tone: 'warm',
+        warmth: 0.78,
+        tension: 0.08,
+        attention: 0.91,
+        confidence: 0.74,
+      },
       duplicate: false,
       received: event,
     }),
@@ -279,6 +286,13 @@ test('mind_presence requires event_id, drops user text and does not take interac
   assert.equal(projection.fatigue, 0.12);
   assert.equal(projection.duplicate, false);
   assert.equal(projection.top_drives[0].key, 'share');
+  assert.deepEqual(projection.session, {
+    tone: 'warm',
+    warmth: 0.78,
+    tension: 0.08,
+    attention: 0.91,
+    confidence: 0.74,
+  });
   const received = projection.received;
   assert.deepEqual(received, { sessionId: 'claude-window', eventId: 'presence-turn-1' });
   assert.equal('interactionType' in received, false);

@@ -838,6 +838,19 @@ export function activeSessionOverlay(input, sessionId, now = new Date()) {
   return structuredClone(overlay);
 }
 
+// Public short-state fields already used by the context envelope session overlay.
+export function sessionOverlayProjection(input, sessionId, now = new Date()) {
+  const overlay = activeSessionOverlay(input, sessionId, now);
+  if (!overlay) return null;
+  return {
+    tone: overlay.tone ?? 'neutral',
+    warmth: Number(overlay.warmth ?? 0.5),
+    tension: Number(overlay.tension ?? 0),
+    attention: Number(overlay.attention ?? 0.5),
+    confidence: Number(overlay.confidence ?? 0.5),
+  };
+}
+
 // ── Top drives ────────────────────────────────────────────────────
 
 export function topDrives(state, limit = 5) {
@@ -847,7 +860,7 @@ export function topDrives(state, limit = 5) {
     .map(([key, value]) => ({ key, label: DIMENSIONS[key].label, value }));
 }
 
-export function compactProjection(state, { duplicate = false } = {}) {
+export function compactProjection(state, { duplicate = false, sessionId = '', now = new Date() } = {}) {
   return {
     revision: Number(state.revision ?? 0),
     consciousness: state.consciousness ?? 'unknown',
@@ -856,6 +869,7 @@ export function compactProjection(state, { duplicate = false } = {}) {
       key: drive.key,
       value: Number(drive.value),
     })),
+    session: sessionOverlayProjection(state, sessionId, now),
     duplicate: Boolean(duplicate),
   };
 }

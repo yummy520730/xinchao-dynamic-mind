@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { breathDreamContext, computeAnticipation, computeLonging, topDrives } from './engine.js';
+import { breathDreamContext, computeAnticipation, computeLonging, sessionOverlayProjection, topDrives } from './engine.js';
 import { renderHandoffNotes } from './handoff-notes.js';
 
 const VALID_MODES = new Set(['session_start', 'turn', 'inspect']);
@@ -46,18 +46,13 @@ export function trimToTokenBudget(value, maxTokens) {
 }
 
 function sessionOverlay(state, sessionId, now) {
+  const session = sessionOverlayProjection(state, sessionId, now);
+  if (!session) return null;
   const overlay = state.sessionOverlays?.[sessionId];
-  if (!overlay) return null;
-  const expiresAt = Date.parse(overlay.expiresAt ?? '');
-  if (Number.isFinite(expiresAt) && expiresAt <= now.getTime()) return null;
   return {
-    tone: overlay.tone ?? 'neutral',
-    warmth: Number(overlay.warmth ?? 0.5),
-    tension: Number(overlay.tension ?? 0),
-    attention: Number(overlay.attention ?? 0.5),
-    confidence: Number(overlay.confidence ?? 0.5),
-    updatedAt: overlay.updatedAt ?? null,
-    expiresAt: overlay.expiresAt ?? null,
+    ...session,
+    updatedAt: overlay?.updatedAt ?? null,
+    expiresAt: overlay?.expiresAt ?? null,
   };
 }
 

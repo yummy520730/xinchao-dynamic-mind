@@ -118,7 +118,7 @@ https://xinchao.example.com/mcp
 | 工具 | 作用 |
 | --- | --- |
 | `xinchao_context` | 获取当前动态短态和近期连续性；同一窗口首次启动默认只交付一次 |
-| `mind_presence` | 真实 user turn 开始时上报在场；settle、醒来、刷新锚点；不要求 interaction_type，不上传用户文本 |
+| `mind_presence` | 真实 user turn 开始时上报在场；settle、醒来、刷新锚点；返回 compact projection（含当前 session overlay）；不要求 interaction_type，不上传用户文本 |
 | `xinchao_state_signal` | 接收 DSM 已确认的 `intimacy_cue`；只允许 `origin=user`，服务端固定 drive 映射 |
 | `xinchao_event` | 回传一次明确完成的互动及有界窗口状态；`event_id` 用于幂等，必须填写 `interaction_type` |
 | `xinchao_handoff_note` | 保存限时近期进度摘要，不保存整段聊天原文 |
@@ -183,7 +183,7 @@ heartbeat 与 `breath` 的定位不同：`breath` 是可能返回上下文的按
 - **均衡档**：希望降低请求量时设置 120–300 秒最小间隔；这不是为了节省上下文。
 - **兼容档**：Claude.ai 普通连接器、手机或无 hook 前端，在会话开始调用 `xinchao_context`，明确互动后调用 `xinchao_event`，服务端应配置更宽的离线阈值。
 
-Claude Code 的真实 user turn 应使用 [`scripts/xinchao-presence-hook.sh`](scripts/xinchao-presence-hook.sh) 作为 `UserPromptSubmit`：脚本只发送 `session_id` 与稳定 `event_id`，调用 conversation presence（`mind_presence` / `POST /v1/conversation-event` 且无 `interaction_type`），并把返回的 compact projection 注入上下文。不要把提示词正文发给心潮。已完成互动仍由 `xinchao_event` 负责，且必须使用不同的 `event_id`。
+Claude Code 的真实 user turn 应使用 [`scripts/xinchao-presence-hook.sh`](scripts/xinchao-presence-hook.sh) 作为 `UserPromptSubmit`：脚本只发送 `session_id` 与稳定 `event_id`，通过公开 `/mcp` JSON-RPC 调用 `mind_presence`，并把返回的 compact projection 注入上下文。不要把提示词正文发给心潮，也不要把 hook 指到内部 `/v1/conversation-event`。已完成互动仍由 `xinchao_event` 负责，且必须使用不同的 `event_id`。
 
 仅刷新在场、不唤醒的 heartbeat 仍可使用 [`scripts/xinchao-heartbeat-hook.sh`](scripts/xinchao-heartbeat-hook.sh)。不要直接把原始 `UserPromptSubmit` HTTP hook 指向心潮，以免完整 hook 请求体携带提示词正文。
 
@@ -193,7 +193,7 @@ Claude Code 的真实 user turn 应使用 [`scripts/xinchao-presence-hook.sh`](s
 {
   "env": {
     "XINCHAO_SERVICE_TOKEN_FILE": "/absolute/private/path/xinchao.service-token",
-    "XINCHAO_PRESENCE_URL": "https://xinchao.example.com/v1/conversation-event"
+    "XINCHAO_MCP_URL": "https://xinchao.example.com/mcp"
   },
   "hooks": {
     "UserPromptSubmit": [

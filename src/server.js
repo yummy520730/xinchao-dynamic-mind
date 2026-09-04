@@ -707,7 +707,11 @@ async function recordConversationEvent(event, source = 'api', now = new Date()) 
     return applied.state;
   });
   return {
-    ...compactProjection(state, { duplicate: applied.duplicate }),
+    ...compactProjection(state, {
+      duplicate: applied.duplicate,
+      sessionId: applied.sessionId,
+      now,
+    }),
     pendingAwareness: state.pendingAwareness,
     sessionId: applied.sessionId || null,
     sessionCreated: applied.sessionCreated,
@@ -1029,6 +1033,7 @@ const server = createServer(async (request, response) => {
             consciousness: result.consciousness,
             fatigue: result.fatigue,
             top_drives: result.top_drives,
+            session: result.session ?? null,
             duplicate: result.duplicate,
           };
         },

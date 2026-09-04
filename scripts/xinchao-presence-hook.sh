@@ -1,8 +1,8 @@
 #!/bin/sh
 
 # Claude Code UserPromptSubmit hook for Xinchao conversation presence.
-# Reports "the user arrived" without sending prompt text, then injects the
-# compact projection returned by the presence apply.
+# Calls the public /mcp JSON-RPC mind_presence tool without sending prompt
+# text, then injects the compact projection returned by the presence apply.
 
 set -u
 
@@ -46,13 +46,18 @@ if [ -z "$token" ]; then
   exit 0
 fi
 
-presence_url=${XINCHAO_PRESENCE_URL:-${XINCHAO_CONVERSATION_EVENT_URL:-}}
-if [ -z "$presence_url" ]; then
+mcp_url=${XINCHAO_MCP_URL:-${XINCHAO_PRESENCE_URL:-}}
+if [ -z "$mcp_url" ]; then
   heartbeat_url=${XINCHAO_HEARTBEAT_URL:-https://xinchao.guchuan.men/v1/heartbeat}
-  presence_url=$(printf '%s' "$heartbeat_url" | sed 's#/v1/heartbeat/*$#/v1/conversation-event#')
+  mcp_url=$(printf '%s' "$heartbeat_url" | sed 's#/v1/heartbeat/*$#/mcp#')
 fi
-case "$presence_url" in
-  https://*|http://127.0.0.1:*|http://localhost:*) ;;
+case "$mcp_url" in
+  */v1/conversation-event*|*/v1/heartbeat*) exit 0 ;;
+esac
+case "$mcp_url" in
+  https://*/mcp|https://*/mcp/|https://*/mcp/*) ;;
+  http://127.0.0.1:*/mcp|http://127.0.0.1:*/mcp/|http://127.0.0.1:*/mcp/*) ;;
+  http://localhost:*/mcp|http://localhost:*/mcp/|http://localhost:*/mcp/*) ;;
   *) exit 0 ;;
 esac
 
@@ -71,22 +76,35 @@ fi
 payload=$("$jq_bin" -cn \
   --arg session_id "$session_id" \
   --arg event_id "$event_id" \
-  '{session_id: $session_id, event_id: $event_id}')
+  '{
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: {
+      name: "mind_presence",
+      arguments: {session_id: $session_id, event_id: $event_id}
+    }
+  }')
 
 response=$("$curl_bin" -fsS --max-time 8 \
   -X POST \
   -H "Authorization: Bearer $token" \
   -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
   --data "$payload" \
-  "$presence_url" 2>/dev/null) || exit 0
+  "$mcp_url" 2>/dev/null) || exit 0
 
 projection=$(printf '%s' "$response" | "$jq_bin" -c '
-  select((.revision | type) == "number")
+  .result
+  | select(.isError != true)
+  | (.structuredContent // (.content[0].text | fromjson?))
+  | select((.revision | type) == "number")
   | {
       revision,
       consciousness,
       fatigue,
       top_drives,
+      session: (.session // null),
       duplicate
     }
 ' 2>/dev/null) || exit 0
