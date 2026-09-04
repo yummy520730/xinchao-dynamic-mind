@@ -406,7 +406,7 @@ test('presence hook does not call the internal conversation-event API', async ()
   assert.equal(result.stdout.trim(), '');
 });
 
-test('presence hook official UserPromptSubmit schema yields unique stable event_ids', async (t) => {
+test('presence hook without a turn id issues a new event_id per invocation even for identical prompts', async (t) => {
   const captured = [];
   const server = createServer((request, response) => {
     const chunks = [];
@@ -444,13 +444,14 @@ test('presence hook official UserPromptSubmit schema yields unique stable event_
     await rm(stateDir, { recursive: true, force: true });
   });
 
-  const officialInput = (prompt) => ({
+  const officialInput = (prompt, extra = {}) => ({
     hook_event_name: 'UserPromptSubmit',
     session_id: 'official-session-1',
     transcript_path: '/tmp/does-not-exist-xinchao-presence.jsonl',
     cwd: '/tmp',
     permission_mode: 'default',
     prompt,
+    ...extra,
   });
   const env = {
     XINCHAO_SERVICE_TOKEN: 'presence-hook-test-token-0123456789ab',
@@ -458,21 +459,25 @@ test('presence hook official UserPromptSubmit schema yields unique stable event_
     XINCHAO_PRESENCE_STATE_DIR: stateDir,
   };
 
-  const first = await runHook(env, officialInput('第一个用户回合'));
-  const retry = await runHook(env, officialInput('第一个用户回合'));
-  const second = await runHook(env, officialInput('第二个不同的用户回合'));
+  const first = await runHook(env, officialInput('嗯'));
+  const second = await runHook(env, officialInput('嗯'));
+  const explicitFirst = await runHook(env, officialInput('嗯', { event_id: 'presence-explicit-1' }));
+  const explicitRetry = await runHook(env, officialInput('嗯', { event_id: 'presence-explicit-1' }));
   server.close();
   await once(server, 'close');
 
   assert.equal(first.code, 0);
-  assert.equal(retry.code, 0);
   assert.equal(second.code, 0);
+  assert.equal(explicitFirst.code, 0);
+  assert.equal(explicitRetry.code, 0);
   const posted = captured.filter((item) => item.body?.params?.arguments?.session_id === 'official-session-1');
-  assert.equal(posted.length, 3, JSON.stringify(captured.map((item) => item.body?.params?.arguments ?? item.body)));
+  assert.equal(posted.length, 4, JSON.stringify(captured.map((item) => item.body?.params?.arguments ?? item.body)));
   const ids = posted.map((item) => item.body.params.arguments.event_id);
-  assert.match(ids[0], /^presence-\d+$/);
-  assert.equal(ids[0], ids[1]);
-  assert.notEqual(ids[0], ids[2]);
+  assert.match(ids[0], /^presence-[0-9]+-[0-9]+$/);
+  assert.match(ids[1], /^presence-[0-9]+-[0-9]+$/);
+  assert.notEqual(ids[0], ids[1]);
+  assert.equal(ids[2], 'presence-explicit-1');
+  assert.equal(ids[3], 'presence-explicit-1');
   for (const item of posted) {
     assert.equal(item.url, '/mcp');
     assert.equal(item.body.method, 'tools/call');
@@ -480,11 +485,9 @@ test('presence hook official UserPromptSubmit schema yields unique stable event_
     assert.deepEqual(Object.keys(item.body.params.arguments).sort(), ['event_id', 'session_id']);
     assert.equal(item.body.params.arguments.session_id, 'official-session-1');
     const serialized = JSON.stringify(item.body);
-    assert.equal(serialized.includes('第一个用户回合'), false);
-    assert.equal(serialized.includes('第二个不同的用户回合'), false);
+    assert.equal(serialized.includes('嗯'), false);
     assert.equal(serialized.includes('prompt'), false);
     assert.equal(serialized.includes('transcript_path'), false);
-    assert.equal(serialized.includes('用户回合'), false);
   }
 });
 
