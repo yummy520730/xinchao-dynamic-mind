@@ -60,6 +60,41 @@ export const XINCHAO_TOOLS = [
     },
   },
   {
+    name: 'mind_presence',
+    title: '上报真实用户在场',
+    description: [
+      '在每个真实 user turn 开始时上报“用户来了”。',
+      '只做 conversation presence：settle 到当前时间、sleeping→awake、刷新 lastConversationAt 与在场锚点。',
+      '不要求也不推断 interaction_type，不应用互动效果，不产生 satisfaction / drive relief，不接受用户文本。',
+      'event_id 必须稳定且幂等；重试复用同一个值。session_id 通常省略，由当前 MCP 连接提供。',
+    ].join(''),
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 120,
+          description: '可选覆盖值。通常省略，由服务端使用当前 MCP 连接的稳定窗口标识。',
+        },
+        event_id: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 120,
+          description: '本次真实用户回合的稳定不透明标识；重试必须复用同一个值。',
+        },
+      },
+      required: ['event_id'],
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
     name: 'xinchao_state_signal',
     title: '提交受限状态信号',
     description: [
@@ -288,6 +323,14 @@ function contextArgs(args = {}, fallbackSessionId = '') {
   };
 }
 
+function presenceArgs(args = {}, fallbackSessionId = '') {
+  const sessionId = stableSessionId(args, fallbackSessionId);
+  if (!sessionId) throw new Error('session_id 是必填项');
+  const eventId = String(args.event_id ?? '').trim().slice(0, 120);
+  if (!eventId) throw new Error('event_id 是必填项，用于避免重复结算');
+  return { sessionId, eventId };
+}
+
 function eventArgs(args = {}, fallbackSessionId = '') {
   const sessionId = stableSessionId(args, fallbackSessionId);
   if (!sessionId) throw new Error('session_id 是必填项');
@@ -360,6 +403,10 @@ async function callTool(name, args, handlers) {
       : '本窗口的心潮交接已经完成，本次不重复注入。';
     return toolText(text, envelope);
   }
+  if (name === 'mind_presence') {
+    const result = await handlers.presence(presenceArgs(args, fallbackSessionId));
+    return toolText(JSON.stringify(result), result);
+  }
   if (name === 'xinchao_state_signal') {
     const result = await handlers.stateSignal(stateSignalArgs(args));
     const duplicate = result.duplicate ? ' duplicate=true' : '';
@@ -414,14 +461,15 @@ export async function handleMcpMessage(payload, handlers) {
         serverInfo: {
           name: 'xinchao-dynamic-mind',
           title: '心潮动态心智系统',
-          version: '2.5.14-lmc.1',
+          version: '2.5.15-lmc.1',
         },
         instructions: [
-          '新窗口开始时调用 xinchao_context；服务端会绑定当前 MCP 连接，无需自行编写 session_id。',
+          '真实用户回合开始时调用 mind_presence 上报在场；event_id 必须唯一，重试时复用。不要提交用户文本或 interaction_type。',
+          '新窗口开始或需要完整交接时调用 xinchao_context；服务端会绑定当前 MCP 连接，无需自行编写 session_id。',
           'xinchao_state_signal 只接收外部 deterministic state machine 已确认的用户点火信号；不要由模型自造。',
-          '一次实际互动后可调用 xinchao_event 更新窗口短状态；event_id 必须唯一，重试时复用。',
+          '一次实际完成的互动后可调用 xinchao_event 更新窗口短状态；与 mind_presence 使用不同 event_id。',
           '需要换窗续接时可调用 xinchao_handoff_note 保存近期进度摘要；不要提交聊天原文或人物基岩。',
-          '只有结果明确的真实互动才调用，且必须填写 interaction_type；不要提交聊天正文或欲望数值。',
+          '只有结果明确的真实互动才调用 xinchao_event，且必须填写 interaction_type；不要提交聊天正文或欲望数值。',
           '只有你独立产生了想留给用户的话时才调用 xinchao_from_me；用户页面不能替你写。',
         ].join(''),
       }),

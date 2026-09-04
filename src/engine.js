@@ -131,9 +131,11 @@ function stateSignalOrigin(event) {
 
 function interactionAlreadyProcessed(state, eventId) {
   const fingerprint = eventFingerprint(eventId);
+  const events = state?.recentConversationEvents;
   return Boolean(
     fingerprint
-    && state.recentConversationEvents.some((item) => item?.eventFingerprint === fingerprint),
+    && Array.isArray(events)
+    && events.some((item) => item?.eventFingerprint === fingerprint),
   );
 }
 
@@ -565,10 +567,10 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
   // Clients report semantic events only. Numeric deltas, self-selected
   // satisfaction and arbitrary thought text are intentionally ignored.
 
-  // Presence-only heartbeats are not semantic interactions. Keeping them out
-  // of this history prevents a healthy recall heartbeat from looking like a
-  // broken interaction with interactionType=null.
-  if (type) recordConversationEventFingerprint(state, eventId, type, now);
+  // Presence-only heartbeats are not semantic interactions and return earlier.
+  // Real conversation events — including presence with no interaction_type —
+  // keep event_id fingerprints so retries cannot replay wake/anchor effects.
+  if (eventId) recordConversationEventFingerprint(state, eventId, type, now);
   state.revision += 1;
   return {
     state,
@@ -582,6 +584,32 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
 }
 
 export function settleAndApplyConversationEvent(input, event = {}, now = new Date(), options = {}) {
+  const type = interactionType(event);
+  const eventId = cleanEventId(event);
+  // Presence retries must not settle first. settleState always rewrites
+  // lastSettledAt and may bump revision, which would make a later duplicate
+  // look like a new transition.
+  if (options.presenceOnly !== true && !type && interactionAlreadyProcessed(input, eventId)) {
+    return {
+      state: structuredClone(input),
+      changed: false,
+      duplicate: true,
+      wasSleeping: false,
+      sessionId: cleanSessionId(event),
+      sessionCreated: false,
+      interaction: {
+        type: null,
+        applied: false,
+        reasonCode: 'duplicate_event',
+        affectedDrives: [],
+      },
+      settled: {
+        changed: false,
+        elapsedHours: 0,
+        idleMinutes: 0,
+      },
+    };
+  }
   const settled = settleState(
     input,
     now,
@@ -838,6 +866,19 @@ export function activeSessionOverlay(input, sessionId, now = new Date()) {
   return structuredClone(overlay);
 }
 
+// Public short-state fields already used by the context envelope session overlay.
+export function sessionOverlayProjection(input, sessionId, now = new Date()) {
+  const overlay = activeSessionOverlay(input, sessionId, now);
+  if (!overlay) return null;
+  return {
+    tone: overlay.tone ?? 'neutral',
+    warmth: Number(overlay.warmth ?? 0.5),
+    tension: Number(overlay.tension ?? 0),
+    attention: Number(overlay.attention ?? 0.5),
+    confidence: Number(overlay.confidence ?? 0.5),
+  };
+}
+
 // ── Top drives ────────────────────────────────────────────────────
 
 export function topDrives(state, limit = 5) {
@@ -845,6 +886,20 @@ export function topDrives(state, limit = 5) {
     .sort((a, b) => b[1] - a[1])
     .slice(0, limit)
     .map(([key, value]) => ({ key, label: DIMENSIONS[key].label, value }));
+}
+
+export function compactProjection(state, { duplicate = false, sessionId = '', now = new Date() } = {}) {
+  return {
+    revision: Number(state.revision ?? 0),
+    consciousness: state.consciousness ?? 'unknown',
+    fatigue: Number(state.fatigue ?? 0),
+    top_drives: topDrives(state, 3).map((drive) => ({
+      key: drive.key,
+      value: Number(drive.value),
+    })),
+    session: sessionOverlayProjection(state, sessionId, now),
+    duplicate: Boolean(duplicate),
+  };
 }
 
 // ── Dream management ──────────────────────────────────────────────

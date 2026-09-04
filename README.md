@@ -15,7 +15,7 @@
 
 - **HTTP 便签闭环**：补齐 `POST /v1/handoff-note`，HTTP 前端与 MCP 客户端现在使用同一套有界、幂等的短期交接。
 - **在场时间修复**：heartbeat 和真实 `xinchao_event` 都会刷新 `lastHeartbeatAt`，避免在线时被自主推送误判为长期离线。
-- **隐私版窗口 hook**：提供只发送会话 ID 与随机事件 ID 的 Claude Code 脚本，不上传提示词正文。
+- **隐私版窗口 hook**：`UserPromptSubmit` 通过 `mind_presence` 只发送会话 ID 与稳定事件 ID，注入 compact projection，不上传提示词正文。
 - **稳定 MCP 窗口**：初始化时由服务端签发 `Mcp-Session-Id`，不再依赖模型临时编写窗口 ID。
 - **近期连续性**：Context Envelope 只携带动态短态、近期交接和可选的长期记忆召回，不替代客户端自己的核心指令或人物基岩。
 - **短期交接便签**：`xinchao_handoff_note` 最多 1200 字、默认 72 小时过期，不保存整段聊天原文。
@@ -118,8 +118,9 @@ https://xinchao.example.com/mcp
 | 工具 | 作用 |
 | --- | --- |
 | `xinchao_context` | 获取当前动态短态和近期连续性；同一窗口首次启动默认只交付一次 |
+| `mind_presence` | 真实 user turn 开始时上报在场；settle、醒来、刷新锚点；返回 compact projection（含当前 session overlay）；不要求 interaction_type，不上传用户文本 |
 | `xinchao_state_signal` | 接收 DSM 已确认的 `intimacy_cue`；只允许 `origin=user`，服务端固定 drive 映射 |
-| `xinchao_event` | 回传一次明确互动及有界窗口状态；`event_id` 用于幂等 |
+| `xinchao_event` | 回传一次明确完成的互动及有界窗口状态；`event_id` 用于幂等，必须填写 `interaction_type` |
 | `xinchao_handoff_note` | 保存限时近期进度摘要，不保存整段聊天原文 |
 
 `session_id` 是可选覆盖值。正常情况下服务端会使用 MCP 连接自带的稳定窗口 ID。
@@ -182,7 +183,9 @@ heartbeat 与 `breath` 的定位不同：`breath` 是可能返回上下文的按
 - **均衡档**：希望降低请求量时设置 120–300 秒最小间隔；这不是为了节省上下文。
 - **兼容档**：Claude.ai 普通连接器、手机或无 hook 前端，在会话开始调用 `xinchao_context`，明确互动后调用 `xinchao_event`，服务端应配置更宽的离线阈值。
 
-Claude Code 可使用仓库中的 [`scripts/xinchao-heartbeat-hook.sh`](scripts/xinchao-heartbeat-hook.sh)。脚本读取 hook 输入后只保留 `session_id`，主动丢弃 `prompt`。不要直接把 `UserPromptSubmit` 配成指向心潮的原始 HTTP hook，否则客户端可能把包含提示词的完整 hook JSON 发送出去。
+Claude Code 的真实 user turn 应使用 [`scripts/xinchao-presence-hook.sh`](scripts/xinchao-presence-hook.sh) 作为 `UserPromptSubmit`：脚本只发送 `session_id` 与稳定 `event_id`，通过公开 `/mcp` JSON-RPC 调用 `mind_presence`，并把返回的 compact projection 注入上下文。官方 payload 若不提供 uuid / turn_id / prompt_id / event_id，hook 用 session 持久递增 nonce 为每次独立 invocation 生成新的 `event_id`，不把相同正文当成 retry，也不依赖 transcript 文件存在。有显式 turn id 时复用该值。不要把提示词正文发给心潮，也不要把 hook 指到内部 `/v1/conversation-event`。已完成互动仍由 `xinchao_event` 负责，且必须使用不同的 `event_id`。
+
+仅刷新在场、不唤醒的 heartbeat 仍可使用 [`scripts/xinchao-heartbeat-hook.sh`](scripts/xinchao-heartbeat-hook.sh)。不要直接把原始 `UserPromptSubmit` HTTP hook 指向心潮，以免完整 hook 请求体携带提示词正文。
 
 本机私有 `.claude/settings.local.json` 示例：
 
@@ -190,8 +193,7 @@ Claude Code 可使用仓库中的 [`scripts/xinchao-heartbeat-hook.sh`](scripts/
 {
   "env": {
     "XINCHAO_SERVICE_TOKEN_FILE": "/absolute/private/path/xinchao.service-token",
-    "XINCHAO_HEARTBEAT_URL": "https://xinchao.example.com/v1/heartbeat",
-    "XINCHAO_HEARTBEAT_MIN_INTERVAL_SECONDS": "0"
+    "XINCHAO_MCP_URL": "https://xinchao.example.com/mcp"
   },
   "hooks": {
     "UserPromptSubmit": [
@@ -199,8 +201,8 @@ Claude Code 可使用仓库中的 [`scripts/xinchao-heartbeat-hook.sh`](scripts/
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/xinchao-heartbeat-hook.sh",
-            "timeout": 5
+            "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/xinchao-presence-hook.sh",
+            "timeout": 10
           }
         ]
       }
@@ -209,7 +211,7 @@ Claude Code 可使用仓库中的 [`scripts/xinchao-heartbeat-hook.sh`](scripts/
 }
 ```
 
-token 文件应放在仓库外并设为 `0600`；私有设置不要提交。均衡档将最小间隔改成 `120` 或 `300`。
+token 文件应放在仓库外并设为 `0600`；私有设置不要提交。
 
 ## 长期记忆边界
 

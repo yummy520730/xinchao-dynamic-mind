@@ -35,6 +35,25 @@ function handlers() {
       received: note,
     }),
     fromMe: async (entry) => ({ id: 'from-me-1', duplicate: false, received: entry }),
+    presence: async (event) => ({
+      revision: 9,
+      consciousness: 'awake',
+      fatigue: 0.12,
+      top_drives: [
+        { key: 'share', value: 0.74 },
+        { key: 'curiosity', value: 0.69 },
+        { key: 'crave', value: 0.66 },
+      ],
+      session: {
+        tone: 'warm',
+        warmth: 0.78,
+        tension: 0.08,
+        attention: 0.91,
+        confidence: 0.74,
+      },
+      duplicate: false,
+      received: event,
+    }),
   };
 }
 
@@ -48,34 +67,39 @@ test('MCP initialize advertises the 2.4.0 tool server', async () => {
   assert.equal(result.status, 200);
   assert.equal(result.body.result.protocolVersion, '2025-06-18');
   assert.equal(result.body.result.serverInfo.name, 'xinchao-dynamic-mind');
-  assert.equal(result.body.result.serverInfo.version, '2.5.14-lmc.1');
+  assert.equal(result.body.result.serverInfo.version, '2.5.15-lmc.1');
   assert.equal(result.body.result.capabilities.tools.listChanged, false);
 });
 
-test('tools/list exposes context, event and short handoff note tools', async () => {
+test('tools/list exposes context, presence, event and short handoff note tools', async () => {
   const result = await handleMcpMessage({
     jsonrpc: '2.0',
     id: 2,
     method: 'tools/list',
   }, handlers());
+  const tools = Object.fromEntries(result.body.result.tools.map((tool) => [tool.name, tool]));
   assert.deepEqual(
     result.body.result.tools.map((tool) => tool.name),
-    ['xinchao_context', 'xinchao_state_signal', 'xinchao_event', 'xinchao_handoff_note', 'xinchao_from_me'],
+    ['xinchao_context', 'mind_presence', 'xinchao_state_signal', 'xinchao_event', 'xinchao_handoff_note', 'xinchao_from_me'],
   );
-  assert.equal(result.body.result.tools[0].annotations.readOnlyHint, true);
-  assert.equal(result.body.result.tools[1].annotations.destructiveHint, false);
-  assert.equal(result.body.result.tools[1].annotations.idempotentHint, true);
-  assert.deepEqual(result.body.result.tools[0].inputSchema.required, undefined);
-  assert.equal(result.body.result.tools[0].inputSchema.properties.max_tokens.default, 2200);
-  assert.deepEqual(result.body.result.tools[1].inputSchema.required, ['event_id', 'signal_type', 'origin']);
-  assert.deepEqual(result.body.result.tools[1].inputSchema.properties.signal_type.enum, ['intimacy_cue']);
-  assert.deepEqual(result.body.result.tools[1].inputSchema.properties.origin.enum, ['user']);
-  assert.ok(result.body.result.tools[2].inputSchema.required.includes('event_id'));
-  assert.equal(result.body.result.tools[2].inputSchema.required.includes('session_id'), false);
-  assert.ok(result.body.result.tools[2].inputSchema.properties.interaction_type.enum.includes('sharing'));
-  assert.equal(result.body.result.tools[3].annotations.idempotentHint, true);
+  assert.equal(tools.xinchao_context.annotations.readOnlyHint, true);
+  assert.deepEqual(tools.xinchao_context.inputSchema.required, undefined);
+  assert.equal(tools.xinchao_context.inputSchema.properties.max_tokens.default, 2200);
+  assert.equal(tools.mind_presence.annotations.idempotentHint, true);
+  assert.deepEqual(tools.mind_presence.inputSchema.required, ['event_id']);
+  assert.equal('interaction_type' in tools.mind_presence.inputSchema.properties, false);
+  assert.equal(tools.xinchao_state_signal.annotations.destructiveHint, false);
+  assert.equal(tools.xinchao_state_signal.annotations.idempotentHint, true);
+  assert.deepEqual(tools.xinchao_state_signal.inputSchema.required, ['event_id', 'signal_type', 'origin']);
+  assert.deepEqual(tools.xinchao_state_signal.inputSchema.properties.signal_type.enum, ['intimacy_cue']);
+  assert.deepEqual(tools.xinchao_state_signal.inputSchema.properties.origin.enum, ['user']);
+  assert.ok(tools.xinchao_event.inputSchema.required.includes('event_id'));
+  assert.ok(tools.xinchao_event.inputSchema.required.includes('interaction_type'));
+  assert.equal(tools.xinchao_event.inputSchema.required.includes('session_id'), false);
+  assert.ok(tools.xinchao_event.inputSchema.properties.interaction_type.enum.includes('sharing'));
+  assert.equal(tools.xinchao_handoff_note.annotations.idempotentHint, true);
   assert.deepEqual(
-    result.body.result.tools[3].inputSchema.required,
+    tools.xinchao_handoff_note.inputSchema.required,
     ['event_id', 'note'],
   );
 });
@@ -227,4 +251,78 @@ test('xinchao_from_me action results require a valid drive for satisfaction', as
   }, handlers());
   assert.equal(accepted.body.result.isError, false);
   assert.equal(accepted.body.result.structuredContent.received.driveKey, 'share');
+});
+
+test('mind_presence requires event_id, drops user text and does not take interaction_type', async () => {
+  const missing = await handleMcpMessage({
+    jsonrpc: '2.0',
+    id: 40,
+    method: 'tools/call',
+    params: { name: 'mind_presence', arguments: { session_id: 'claude-window' } },
+  }, handlers());
+  assert.equal(missing.body.result.isError, true);
+  assert.match(missing.body.result.content[0].text, /event_id/);
+
+  const result = await handleMcpMessage({
+    jsonrpc: '2.0',
+    id: 41,
+    method: 'tools/call',
+    params: {
+      name: 'mind_presence',
+      arguments: {
+        session_id: 'claude-window',
+        event_id: 'presence-turn-1',
+        interaction_type: 'sharing',
+        prompt: '这段用户原文绝不能进入心潮',
+        message: '也不允许聊天正文',
+        driveDeltas: { share: 1 },
+      },
+    },
+  }, handlers());
+  assert.equal(result.body.result.isError, false);
+  const projection = result.body.result.structuredContent;
+  assert.equal(projection.revision, 9);
+  assert.equal(projection.consciousness, 'awake');
+  assert.equal(projection.fatigue, 0.12);
+  assert.equal(projection.duplicate, false);
+  assert.equal(projection.top_drives[0].key, 'share');
+  assert.deepEqual(projection.session, {
+    tone: 'warm',
+    warmth: 0.78,
+    tension: 0.08,
+    attention: 0.91,
+    confidence: 0.74,
+  });
+  const received = projection.received;
+  assert.deepEqual(received, { sessionId: 'claude-window', eventId: 'presence-turn-1' });
+  assert.equal('interactionType' in received, false);
+  assert.equal('prompt' in received, false);
+  assert.equal('message' in received, false);
+  assert.doesNotMatch(JSON.stringify(received), /用户原文/);
+});
+
+test('mind_presence falls back to the stable transport session', async () => {
+  const result = await handleMcpMessage({
+    jsonrpc: '2.0',
+    id: 42,
+    method: 'tools/call',
+    params: { name: 'mind_presence', arguments: { event_id: 'presence-turn-2' } },
+  }, handlers());
+  assert.equal(result.body.result.isError, false);
+  assert.equal(result.body.result.structuredContent.received.sessionId, 'transport-session-1');
+  assert.equal(result.body.result.structuredContent.received.eventId, 'presence-turn-2');
+});
+
+test('xinchao_event still requires interaction_type after mind_presence', async () => {
+  const result = await handleMcpMessage({
+    jsonrpc: '2.0',
+    id: 43,
+    method: 'tools/call',
+    params: {
+      name: 'xinchao_event',
+      arguments: { session_id: 'claude-window', event_id: 'completed-1' },
+    },
+  }, handlers());
+  assert.equal(result.body.result.isError, true);
+  assert.match(result.body.result.content[0].text, /interaction_type/);
 });
