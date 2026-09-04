@@ -24,13 +24,6 @@ session_id=$(printf '%s' "$hook_input" | "$jq_bin" -r '
   end
 ' 2>/dev/null) || exit 0
 
-transcript_path=$(printf '%s' "$hook_input" | "$jq_bin" -r '
-  if (.transcript_path | type) == "string" and (.transcript_path | length) > 0
-  then .transcript_path
-  else empty
-  end
-' 2>/dev/null) || true
-
 explicit_id=$(printf '%s' "$hook_input" | "$jq_bin" -r '
   first(
     (.uuid, .turn_id, .prompt_id, .event_id)
@@ -64,13 +57,50 @@ esac
 if [ -n "$explicit_id" ]; then
   event_id=$explicit_id
 else
-  transcript_meta="none"
-  if [ -n "${transcript_path:-}" ] && [ -e "$transcript_path" ]; then
-    transcript_meta=$(wc -c < "$transcript_path" 2>/dev/null | tr -d ' ')
-    transcript_meta="${transcript_meta}:$(date -r "$transcript_path" +%s 2>/dev/null || printf '0')"
+  # Official UserPromptSubmit may only have session_id / transcript_path / prompt.
+  # Hash the prompt locally so each turn is unique and retries are stable.
+  # The prompt itself never leaves this process.
+  prompt_fp=$(printf '%s' "$hook_input" | "$jq_bin" -r '
+    if (.prompt | type) == "string" then .prompt else "" end
+  ' 2>/dev/null | cksum | awk '{print $1}')
+  state_dir=${XINCHAO_PRESENCE_STATE_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/xinchao-presence}
+  session_key=$(printf '%s' "$session_id" | cksum | awk '{print $1}')
+  stamp_file=$state_dir/$session_key.json
+  now_epoch=$(date +%s)
+  stored_fp=
+  stored_id=
+  stored_at=0
+  stored_nonce=0
+  if [ -r "$stamp_file" ]; then
+    stored_fp=$("$jq_bin" -r '.fingerprint // empty' "$stamp_file" 2>/dev/null) || stored_fp=
+    stored_id=$("$jq_bin" -r '.event_id // empty' "$stamp_file" 2>/dev/null) || stored_id=
+    stored_at=$("$jq_bin" -r '.at // 0' "$stamp_file" 2>/dev/null) || stored_at=0
+    stored_nonce=$("$jq_bin" -r '.nonce // 0' "$stamp_file" 2>/dev/null) || stored_nonce=0
   fi
-  event_id=$(printf 'presence:%s:%s:%s' "$session_id" "${transcript_path:-}" "$transcript_meta" \
-    | cksum | awk '{print "presence-" $1}')
+  case "$stored_at" in ''|*[!0-9]*) stored_at=0 ;; esac
+  case "$stored_nonce" in ''|*[!0-9]*) stored_nonce=0 ;; esac
+  event_id=
+  if [ -n "$stored_id" ] && [ "$stored_fp" = "$prompt_fp" ] \
+    && [ $((now_epoch - stored_at)) -le 30 ]; then
+    event_id=$stored_id
+  else
+    nonce=$((stored_nonce + 1))
+    event_id=$(printf 'presence:%s:%s:%s' "$session_id" "$prompt_fp" "$nonce" \
+      | cksum | awk '{print "presence-" $1}')
+    mkdir -p "$state_dir" 2>/dev/null || true
+    stamp_tmp=$state_dir/.$session_key.$$
+    if "$jq_bin" -cn \
+      --arg fingerprint "$prompt_fp" \
+      --arg event_id "$event_id" \
+      --argjson at "$now_epoch" \
+      --argjson nonce "$nonce" \
+      '{fingerprint:$fingerprint,event_id:$event_id,at:$at,nonce:$nonce}' \
+      >"$stamp_tmp" 2>/dev/null; then
+      mv "$stamp_tmp" "$stamp_file" 2>/dev/null || rm -f "$stamp_tmp"
+    else
+      rm -f "$stamp_tmp"
+    fi
+  fi
 fi
 
 payload=$("$jq_bin" -cn \

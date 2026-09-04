@@ -131,9 +131,11 @@ function stateSignalOrigin(event) {
 
 function interactionAlreadyProcessed(state, eventId) {
   const fingerprint = eventFingerprint(eventId);
+  const events = state?.recentConversationEvents;
   return Boolean(
     fingerprint
-    && state.recentConversationEvents.some((item) => item?.eventFingerprint === fingerprint),
+    && Array.isArray(events)
+    && events.some((item) => item?.eventFingerprint === fingerprint),
   );
 }
 
@@ -582,6 +584,32 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
 }
 
 export function settleAndApplyConversationEvent(input, event = {}, now = new Date(), options = {}) {
+  const type = interactionType(event);
+  const eventId = cleanEventId(event);
+  // Presence retries must not settle first. settleState always rewrites
+  // lastSettledAt and may bump revision, which would make a later duplicate
+  // look like a new transition.
+  if (options.presenceOnly !== true && !type && interactionAlreadyProcessed(input, eventId)) {
+    return {
+      state: structuredClone(input),
+      changed: false,
+      duplicate: true,
+      wasSleeping: false,
+      sessionId: cleanSessionId(event),
+      sessionCreated: false,
+      interaction: {
+        type: null,
+        applied: false,
+        reasonCode: 'duplicate_event',
+        affectedDrives: [],
+      },
+      settled: {
+        changed: false,
+        elapsedHours: 0,
+        idleMinutes: 0,
+      },
+    };
+  }
   const settled = settleState(
     input,
     now,

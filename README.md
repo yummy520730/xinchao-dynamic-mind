@@ -183,7 +183,7 @@ heartbeat 与 `breath` 的定位不同：`breath` 是可能返回上下文的按
 - **均衡档**：希望降低请求量时设置 120–300 秒最小间隔；这不是为了节省上下文。
 - **兼容档**：Claude.ai 普通连接器、手机或无 hook 前端，在会话开始调用 `xinchao_context`，明确互动后调用 `xinchao_event`，服务端应配置更宽的离线阈值。
 
-Claude Code 的真实 user turn 应使用 [`scripts/xinchao-presence-hook.sh`](scripts/xinchao-presence-hook.sh) 作为 `UserPromptSubmit`：脚本只发送 `session_id` 与稳定 `event_id`，通过公开 `/mcp` JSON-RPC 调用 `mind_presence`，并把返回的 compact projection 注入上下文。不要把提示词正文发给心潮，也不要把 hook 指到内部 `/v1/conversation-event`。已完成互动仍由 `xinchao_event` 负责，且必须使用不同的 `event_id`。
+Claude Code 的真实 user turn 应使用 [`scripts/xinchao-presence-hook.sh`](scripts/xinchao-presence-hook.sh) 作为 `UserPromptSubmit`：脚本只发送 `session_id` 与稳定 `event_id`，通过公开 `/mcp` JSON-RPC 调用 `mind_presence`，并把返回的 compact projection 注入上下文。官方 payload 若不提供 uuid / turn_id / prompt_id / event_id，hook 在本地用 prompt 指纹加 30 秒 stamp/nonce 生成每回合唯一、同回合 retry 稳定的 `event_id`，不依赖 transcript 文件存在。不要把提示词正文发给心潮，也不要把 hook 指到内部 `/v1/conversation-event`。已完成互动仍由 `xinchao_event` 负责，且必须使用不同的 `event_id`。
 
 仅刷新在场、不唤醒的 heartbeat 仍可使用 [`scripts/xinchao-heartbeat-hook.sh`](scripts/xinchao-heartbeat-hook.sh)。不要直接把原始 `UserPromptSubmit` HTTP hook 指向心潮，以免完整 hook 请求体携带提示词正文。
 

@@ -1,4 +1,4 @@
-import test from 'node:test';
+import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -211,19 +211,18 @@ test('mind_presence does not apply interaction effects or satisfaction', async (
   assert.equal(box.lastApplied.interaction.affectedDrives.length, 0);
 });
 
-test('mind_presence retries with the same event_id are idempotent', async () => {
+test('mind_presence retries with the same event_id are zero-mutation even after time passes', async () => {
   const now = new Date('2026-09-03T04:00:00Z');
   const box = { state: newState(now), now };
   const first = await callPresence(box, { event_id: 'presence-turn-3' });
   const afterFirst = structuredClone(box.state);
+  box.now = new Date(now.getTime() + 1500);
   const second = await callPresence(box, { event_id: 'presence-turn-3' });
 
   assert.equal(first.body.result.structuredContent.duplicate, false);
   assert.equal(second.body.result.structuredContent.duplicate, true);
+  assert.deepEqual(box.state, afterFirst);
   assert.equal(second.body.result.structuredContent.revision, afterFirst.revision);
-  assert.equal(box.state.revision, afterFirst.revision);
-  assert.equal(box.state.lastConversationAt, afterFirst.lastConversationAt);
-  assert.deepEqual(box.state.drives, afterFirst.drives);
   assert.deepEqual(second.body.result.structuredContent.session, first.body.result.structuredContent.session);
   assert.equal(second.body.result.structuredContent.consciousness, box.state.consciousness);
 });
@@ -272,11 +271,20 @@ test('conversation event without interaction_type still wakes without drive reli
     eventId: 'presence-http-1',
   }, now, { sleepAfterMinutes: 90, presenceOnly: false });
   assert.equal(retry.duplicate, true);
-  assert.equal(retry.state.revision, first.state.revision);
-  assert.equal(retry.state.lastConversationAt, first.state.lastConversationAt);
-  assert.equal(retry.state.drives.share, 0.8);
+  assert.deepEqual(retry.state, first.state);
+
+  const later = new Date(now.getTime() + 1500);
+  const lateRetry = settleAndApplyConversationEvent(first.state, {
+    sessionId: 'window-1',
+    eventId: 'presence-http-1',
+  }, later, { sleepAfterMinutes: 90, presenceOnly: false });
+  assert.equal(lateRetry.duplicate, true);
+  assert.deepEqual(lateRetry.state, first.state);
+  assert.equal(lateRetry.state.lastSettledAt, first.state.lastSettledAt);
+  assert.equal(lateRetry.state.revision, first.state.revision);
 });
 
+describe('mind_presence HTTP hooks', { concurrency: 1 }, () => {
 test('presence hook calls public /mcp mind_presence and injects session overlay', async () => {
   const captured = [];
   const server = createServer((request, response) => {
@@ -335,16 +343,17 @@ test('presence hook calls public /mcp mind_presence and injects session overlay'
 
   assert.equal(result.code, 0);
   assert.equal(result.stderr, '');
-  assert.equal(captured.length, 1);
-  assert.equal(captured[0].url, '/mcp');
-  assert.equal(captured[0].body.method, 'tools/call');
-  assert.equal(captured[0].body.params.name, 'mind_presence');
-  assert.deepEqual(captured[0].body.params.arguments, {
+  const posted = captured.filter((item) => item.body?.params?.arguments?.event_id === 'presence-stable-1');
+  assert.equal(posted.length, 1, JSON.stringify(captured.map((item) => item.body?.params?.arguments ?? item.body)));
+  assert.equal(posted[0].url, '/mcp');
+  assert.equal(posted[0].body.method, 'tools/call');
+  assert.equal(posted[0].body.params.name, 'mind_presence');
+  assert.deepEqual(posted[0].body.params.arguments, {
     session_id: 'vps-session-1',
     event_id: 'presence-stable-1',
   });
-  assert.equal(JSON.stringify(captured[0].body).includes('用户原文'), false);
-  assert.equal(JSON.stringify(captured[0].body).includes('conversation-event'), false);
+  assert.equal(JSON.stringify(posted[0].body).includes('用户原文'), false);
+  assert.equal(JSON.stringify(posted[0].body).includes('conversation-event'), false);
   const injected = JSON.parse(result.stdout);
   assert.equal(injected.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
   assert.deepEqual(JSON.parse(injected.hookSpecificOutput.additionalContext), {
@@ -393,8 +402,90 @@ test('presence hook does not call the internal conversation-event API', async ()
   server.close();
   await once(server, 'close');
   assert.equal(result.code, 0);
-  assert.equal(captured.length, 0);
+  assert.equal(captured.some((url) => String(url).includes('conversation-event')), false);
   assert.equal(result.stdout.trim(), '');
+});
+
+test('presence hook official UserPromptSubmit schema yields unique stable event_ids', async (t) => {
+  const captured = [];
+  const server = createServer((request, response) => {
+    const chunks = [];
+    request.on('data', (chunk) => chunks.push(chunk));
+    request.on('end', () => {
+      captured.push({
+        url: request.url,
+        body: JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'),
+      });
+      const projection = {
+        revision: 7,
+        consciousness: 'awake',
+        fatigue: 0.1,
+        top_drives: [{ key: 'share', value: 0.5 }],
+        session: null,
+        duplicate: false,
+      };
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        result: {
+          content: [{ type: 'text', text: JSON.stringify(projection) }],
+          structuredContent: projection,
+          isError: false,
+        },
+      }));
+    });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const { port } = server.address();
+  const stateDir = await mkdtemp(join(tmpdir(), 'xinchao-presence-state-'));
+  t.after(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  const officialInput = (prompt) => ({
+    hook_event_name: 'UserPromptSubmit',
+    session_id: 'official-session-1',
+    transcript_path: '/tmp/does-not-exist-xinchao-presence.jsonl',
+    cwd: '/tmp',
+    permission_mode: 'default',
+    prompt,
+  });
+  const env = {
+    XINCHAO_SERVICE_TOKEN: 'presence-hook-test-token-0123456789ab',
+    XINCHAO_MCP_URL: `http://127.0.0.1:${port}/mcp`,
+    XINCHAO_PRESENCE_STATE_DIR: stateDir,
+  };
+
+  const first = await runHook(env, officialInput('第一个用户回合'));
+  const retry = await runHook(env, officialInput('第一个用户回合'));
+  const second = await runHook(env, officialInput('第二个不同的用户回合'));
+  server.close();
+  await once(server, 'close');
+
+  assert.equal(first.code, 0);
+  assert.equal(retry.code, 0);
+  assert.equal(second.code, 0);
+  const posted = captured.filter((item) => item.body?.params?.arguments?.session_id === 'official-session-1');
+  assert.equal(posted.length, 3, JSON.stringify(captured.map((item) => item.body?.params?.arguments ?? item.body)));
+  const ids = posted.map((item) => item.body.params.arguments.event_id);
+  assert.match(ids[0], /^presence-\d+$/);
+  assert.equal(ids[0], ids[1]);
+  assert.notEqual(ids[0], ids[2]);
+  for (const item of posted) {
+    assert.equal(item.url, '/mcp');
+    assert.equal(item.body.method, 'tools/call');
+    assert.equal(item.body.params.name, 'mind_presence');
+    assert.deepEqual(Object.keys(item.body.params.arguments).sort(), ['event_id', 'session_id']);
+    assert.equal(item.body.params.arguments.session_id, 'official-session-1');
+    const serialized = JSON.stringify(item.body);
+    assert.equal(serialized.includes('第一个用户回合'), false);
+    assert.equal(serialized.includes('第二个不同的用户回合'), false);
+    assert.equal(serialized.includes('prompt'), false);
+    assert.equal(serialized.includes('transcript_path'), false);
+    assert.equal(serialized.includes('用户回合'), false);
+  }
 });
 
 test('public /mcp mind_presence returns projection after apply including session', async (t) => {
@@ -474,6 +565,16 @@ test('public /mcp mind_presence returns projection after apply including session
   const retryBody = await retry.json();
   assert.equal(retryBody.result.structuredContent.duplicate, true);
   assert.equal(retryBody.result.structuredContent.consciousness, projection.consciousness);
+  assert.equal(retryBody.result.structuredContent.revision, projection.revision);
   assert.deepEqual(retryBody.result.structuredContent.session, projection.session);
   assert.deepEqual(retryBody.result.structuredContent.top_drives, projection.top_drives);
+
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const lateRetry = await call('presence-live-1');
+  const lateBody = await lateRetry.json();
+  assert.equal(lateBody.result.structuredContent.duplicate, true);
+  assert.equal(lateBody.result.structuredContent.revision, projection.revision);
+  assert.deepEqual(lateBody.result.structuredContent.session, projection.session);
+  assert.deepEqual(lateBody.result.structuredContent.top_drives, projection.top_drives);
+});
 });
