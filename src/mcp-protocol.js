@@ -83,6 +83,11 @@ export const XINCHAO_TOOLS = [
           maxLength: 120,
           description: '本次真实用户回合的稳定不透明标识；重试必须复用同一个值。',
         },
+        occurred_at: { type: 'string', format: 'date-time' },
+        turn_id: { type: 'string', minLength: 1, maxLength: 160 },
+        trigger_event_id: { type: 'string', minLength: 1, maxLength: 160 },
+        causal_parent_id: { type: 'string', minLength: 1, maxLength: 160 },
+        interaction_id: { type: 'string', minLength: 1, maxLength: 160 },
       },
       required: ['event_id'],
       additionalProperties: false,
@@ -176,6 +181,11 @@ export const XINCHAO_TOOLS = [
             'reflection=完成沉淀，conflict=发生冲突，loss=经历失落，reconciliation=完成和解，reassurance=回应不安或梦境。',
           ].join(''),
         },
+        occurred_at: { type: 'string', format: 'date-time' },
+        turn_id: { type: 'string', minLength: 1, maxLength: 160 },
+        trigger_event_id: { type: 'string', minLength: 1, maxLength: 160 },
+        causal_parent_id: { type: 'string', minLength: 1, maxLength: 160 },
+        interaction_id: { type: 'string', minLength: 1, maxLength: 160 },
         tone: {
           type: 'string',
           enum: ['neutral', 'calm', 'warm', 'guarded', 'conflicted', 'focused', 'playful', 'tired'],
@@ -328,7 +338,17 @@ function presenceArgs(args = {}, fallbackSessionId = '') {
   if (!sessionId) throw new Error('session_id 是必填项');
   const eventId = String(args.event_id ?? '').trim().slice(0, 120);
   if (!eventId) throw new Error('event_id 是必填项，用于避免重复结算');
-  return { sessionId, eventId };
+  const event = { sessionId, eventId };
+  for (const [input, output] of Object.entries({
+    occurred_at: 'occurredAt',
+    turn_id: 'turnId',
+    trigger_event_id: 'triggerEventId',
+    causal_parent_id: 'causalParentId',
+    interaction_id: 'interactionId',
+  })) {
+    if (args[input] !== undefined) event[output] = args[input];
+  }
+  return event;
 }
 
 function eventArgs(args = {}, fallbackSessionId = '') {
@@ -345,13 +365,23 @@ function eventArgs(args = {}, fallbackSessionId = '') {
   for (const key of ['tone', 'warmth', 'tension', 'attention', 'confidence']) {
     if (args[key] !== undefined) sessionState[key] = args[key];
   }
-  return {
+  const event = {
     sessionId,
     eventId,
     interactionType,
     sessionState,
     sessionTtlMinutes: Math.max(15, Math.min(1440, numberOr(args.ttl_minutes, 240))),
   };
+  for (const [input, output] of Object.entries({
+    occurred_at: 'occurredAt',
+    turn_id: 'turnId',
+    trigger_event_id: 'triggerEventId',
+    causal_parent_id: 'causalParentId',
+    interaction_id: 'interactionId',
+  })) {
+    if (args[input] !== undefined) event[output] = args[input];
+  }
+  return event;
 }
 
 function stateSignalArgs(args = {}) {

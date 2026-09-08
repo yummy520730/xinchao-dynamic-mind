@@ -18,6 +18,7 @@ import { DashboardAuth } from './dashboard-auth.js';
 import { buildConnectionManifest, buildDashboardSnapshot } from './dashboard-projection.js';
 import { BRIDGE_SERVER_PROTOCOL, BRIDGE_STREAM_PROTOCOL, BridgeQueue } from './bridge-queue.js';
 import { FromMeStore } from './from-me-store.js';
+import { XinchaoSyncEvents } from './sync-events.js';
 
 const config = validateConfig(loadConfig());
 if (!config.serviceToken) throw new Error('SERVICE_TOKEN is required');
@@ -36,6 +37,7 @@ const notificationProvider = config.ntfy.enabled ? 'ntfy' : config.bark.enabled 
 const notificationEnabled = notificationProvider !== 'none';
 const notifier = notificationProvider === 'ntfy' ? new NtfyClient(config.ntfy) : new BarkClient(config.bark);
 const journal = new TransitionJournal(config.journalPath);
+const syncEvents = new XinchaoSyncEvents({ config: config.syncEvents, journal, log });
 const oauth = new OAuthProvider(config.oauth, (event, fields = {}) => log(event, fields));
 const dashboardAuth = new DashboardAuth({
   ...config.dashboard,
@@ -706,6 +708,10 @@ async function recordConversationEvent(event, source = 'api', now = new Date()) 
     });
     return applied.state;
   });
+  if (source !== 'heartbeat') {
+    const kind = (event.interactionType ?? event.interaction_type) ? 'interaction' : 'presence';
+    await syncEvents.recordConversation(event, kind, now);
+  }
   return {
     ...compactProjection(state, {
       duplicate: applied.duplicate,
@@ -1165,6 +1171,10 @@ server.listen(config.port, '0.0.0.0', async () => {
   await store.update((state) => settleState(state, new Date(), config.sleepAfterMinutes, config.settle).state);
   if (config.bridge.enabled) await bridgeQueue.init();
   await fromMeStore.list();
+  await syncEvents.replayPending().catch((error) => log('xinchao_sync_replay_failed', {
+    error_name: error?.name || 'Error',
+    error_code: String(error?.code || 'replay_error').slice(0, 80),
+  }));
   log('service_started', {
     version: SYSTEM_VERSION, port: config.port, shadow: config.shadowMode,
     stateWritable: true, statePath: config.statePath,
@@ -1178,6 +1188,15 @@ timer.unref();
 
 const bridgeTimer = setInterval(() => publishReadyBridgeDeliveries().catch((error) => log('bridge_publish_failed', { message: error.message })), config.bridge.pollSeconds * 1000);
 bridgeTimer.unref();
+
+const syncReplayTimer = setInterval(
+  () => syncEvents.replayPending().catch((error) => log('xinchao_sync_replay_failed', {
+    error_name: error?.name || 'Error',
+    error_code: String(error?.code || 'replay_error').slice(0, 80),
+  })),
+  config.syncEvents.replaySeconds * 1000,
+);
+syncReplayTimer.unref();
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => server.close(() => process.exit(0)));

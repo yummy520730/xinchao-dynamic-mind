@@ -19,6 +19,13 @@ export function loadConfig() {
     serviceToken: process.env.SERVICE_TOKEN ?? '',
     statePath,
     journalPath: process.env.TRANSITION_JOURNAL_PATH ?? '/app/state/transitions.jsonl',
+    syncEvents: {
+      enabled: bool('SYNC_EVENTS_ENABLED', false),
+      url: String(process.env.SYNC_ENGINE_URL ?? '').trim(),
+      token: String(process.env.SYNC_ENGINE_TOKEN ?? ''),
+      timeoutMs: number('SYNC_EVENT_TIMEOUT_MS', 5000, 500, 30000),
+      replaySeconds: number('SYNC_EVENT_REPLAY_SECONDS', 300, 60, 3600),
+    },
     settleIntervalMinutes: number('SETTLE_INTERVAL_MINUTES', 15, 1, 1440),
     sleepAfterMinutes: number('SLEEP_AFTER_MINUTES', 90, 5, 10080),
     shadowMode: bool('SHADOW_MODE', true),
@@ -163,6 +170,36 @@ export function loadConfig() {
 }
 
 export function validateConfig(config) {
+  if (config.syncEvents?.enabled) {
+    if (!config.syncEvents.url) throw new Error('SYNC_ENGINE_URL is required when source events are enabled');
+    if (config.syncEvents.token.length < 32) {
+      throw new Error('SYNC_ENGINE_TOKEN must contain at least 32 characters when source events are enabled');
+    }
+    let parsed;
+    try { parsed = new URL(config.syncEvents.url); }
+    catch { throw new Error('SYNC_ENGINE_URL must be a valid URL'); }
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+      throw new Error('SYNC_ENGINE_URL must be credential-free');
+    }
+    if (parsed.pathname.replace(/\/+$/, '') !== '/events') {
+      throw new Error('SYNC_ENGINE_URL must target the Sync Engine /events endpoint');
+    }
+    const privateHttp = parsed.protocol === 'http:' && (
+      ['localhost', '127.0.0.1', '::1'].includes(parsed.hostname)
+      || parsed.hostname.endsWith('.internal')
+      || parsed.hostname.endsWith('.local')
+      || /^10\./.test(parsed.hostname)
+      || /^192\.168\./.test(parsed.hostname)
+      || /^172\.(1[6-9]|2\d|3[01])\./.test(parsed.hostname)
+    );
+    if (parsed.protocol !== 'https:' && !privateHttp) {
+      throw new Error('SYNC_ENGINE_URL must use HTTPS outside a loopback/private path');
+    }
+    if ([config.serviceToken, config.dashboard?.accessToken, config.bridge?.machineToken]
+      .filter(Boolean).includes(config.syncEvents.token)) {
+      throw new Error('SYNC_ENGINE_TOKEN must be independent from service, dashboard and bridge tokens');
+    }
+  }
   const externalMemoryEnabled = Boolean(
     config.ombre.readEnabled
     || config.ombre.writeEnabled
