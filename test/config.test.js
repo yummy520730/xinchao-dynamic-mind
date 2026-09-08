@@ -28,6 +28,12 @@ function config(overrides = {}) {
       machineToken: '',
       ...(overrides.bridge || {}),
     },
+    syncEvents: {
+      enabled: false,
+      url: '',
+      token: '',
+      ...(overrides.syncEvents || {}),
+    },
   };
 }
 
@@ -121,4 +127,23 @@ test('Bridge requires an independent strong machine token', () => {
   sameAsService.serviceToken = shared;
   assert.throws(() => validateConfig(sameAsService), /must be independent/);
   assert.equal(validateConfig(config({ bridge: { enabled: true, machineToken: 'm'.repeat(32) } })).bridge.enabled, true);
+});
+
+test('Sync Engine adapter accepts loopback or HTTPS only with an independent server token', () => {
+  assert.throws(
+    () => validateConfig(config({ syncEvents: { enabled: true, url: '', token: 's'.repeat(32) } })),
+    /SYNC_ENGINE_URL is required/,
+  );
+  assert.throws(
+    () => validateConfig(config({ syncEvents: { enabled: true, url: 'http://public.example/events', token: 's'.repeat(32) } })),
+    /must use HTTPS/,
+  );
+  assert.equal(
+    validateConfig(config({ syncEvents: { enabled: true, url: 'http://127.0.0.1:8791/events', token: 's'.repeat(32) } })).syncEvents.enabled,
+    true,
+  );
+  assert.equal(
+    validateConfig(config({ syncEvents: { enabled: true, url: 'https://sync.example/events', token: 's'.repeat(32) } })).syncEvents.enabled,
+    true,
+  );
 });
