@@ -275,15 +275,91 @@ test('consecutive miss resets on success and clears when night dream is off', ()
 });
 
 
-test('successful night dream only nudges existing drives once, without residue TTL', () => {
-  const now = new Date('2026-09-16T04:10:00Z');
-  const before = newState(now);
-  const share = before.drives.share;
+test('high attachment relieves possess and crave only', () => {
+  const before = newState();
+  before.drives.possess = 0.80;
+  before.drives.crave = 0.70;
+  before.drives.curiosity = 0.60;
+  before.drives.share = 0.50;
   const after = applyNightDreamDriveNudge(before, {
-    residue: '昨夜那段旧聊天留下了一点想靠近的感觉',
     residue_strength: 0.42,
+    state_projection: { attachment: 'high', curiosity: 'medium', warmth: 'low' },
   });
-  assert.ok(after.drives.share - share <= 0.04 + 1e-9);
+  assert.ok(after.drives.possess < 0.80);
+  assert.ok(after.drives.crave < 0.70);
+  assert.equal(after.drives.curiosity, 0.60);
+  assert.equal(after.drives.share, 0.50);
+  assert.equal(Object.hasOwn(after, 'pendingDreamResidue'), false);
+});
+
+
+test('high curiosity relieves curiosity only', () => {
+  const before = newState();
+  before.drives.possess = 0.80;
+  before.drives.crave = 0.70;
+  before.drives.curiosity = 0.60;
+  before.drives.share = 0.50;
+  const after = applyNightDreamDriveNudge(before, {
+    residue_strength: 0.42,
+    state_projection: { attachment: 'low', curiosity: 'high' },
+  });
+  assert.ok(after.drives.curiosity < 0.60);
+  assert.equal(after.drives.possess, 0.80);
+  assert.equal(after.drives.crave, 0.70);
+  assert.equal(after.drives.share, 0.50);
+});
+
+
+test('high attachment and curiosity relieve both mapped groups', () => {
+  const before = newState();
+  before.drives.possess = 0.80;
+  before.drives.crave = 0.70;
+  before.drives.curiosity = 0.60;
+  before.drives.share = 0.50;
+  const after = applyNightDreamDriveNudge(before, {
+    residue_strength: 0.42,
+    state_projection: { attachment: 'high', curiosity: 'high' },
+  });
+  assert.ok(after.drives.possess < 0.80);
+  assert.ok(after.drives.crave < 0.70);
+  assert.ok(after.drives.curiosity < 0.60);
+  assert.equal(after.drives.share, 0.50);
+});
+
+
+test('medium and low bands leave drives unchanged', () => {
+  const before = newState();
+  const snapshot = { ...before.drives };
+  const after = applyNightDreamDriveNudge(before, {
+    residue_strength: 1,
+    state_projection: {
+      attachment: 'medium',
+      curiosity: 'low',
+      warmth: 'high',
+      tension: 'high',
+      fatigue: 'high',
+    },
+  });
+  assert.deepEqual(after.drives, snapshot);
+  assert.equal(after.revision, before.revision);
   assert.equal(after.pendingDreamResidue, undefined);
+});
+
+
+test('residue_strength 1 caps each target relief ratio at 0.04', () => {
+  const before = newState();
+  before.drives.possess = 0.80;
+  before.drives.crave = 0.70;
+  before.drives.curiosity = 0.60;
+  before.drives.share = 0.50;
+  const after = applyNightDreamDriveNudge(before, {
+    residue_strength: 1,
+    state_projection: { attachment: 'high', curiosity: 'high' },
+  });
+  assert.ok(after.drives.possess >= 0);
+  assert.ok((0.80 - after.drives.possess) / 0.80 <= 0.04 + 1e-9);
+  assert.ok((0.70 - after.drives.crave) / 0.70 <= 0.04 + 1e-9);
+  assert.ok((0.60 - after.drives.curiosity) / 0.60 <= 0.04 + 1e-9);
+  assert.equal(after.drives.share, 0.50);
   assert.equal(Object.hasOwn(after, 'pendingDreamResidue'), false);
 });

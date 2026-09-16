@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { DIMENSIONS } from './dimensions.js';
 import { localDayAndHour, recordDream } from './engine.js';
 
 export const NIGHT_DREAM_MIN_CHARS = 150;
@@ -85,16 +84,31 @@ export function recentNightDreamSourceDates(state, limit = 8) {
 
 export function applyNightDreamDriveNudge(input, dream) {
   const state = structuredClone(input);
+  const projection = dream?.state_projection && typeof dream.state_projection === 'object'
+    ? dream.state_projection
+    : {};
   const strength = clamp01(dream?.residue_strength ?? dream?.residueStrength ?? 0.3);
-  const delta = Math.min(NIGHT_DREAM_DRIVE_NUDGE_CAP, 0.02 + strength * 0.02);
-  const ceiling = Number(DIMENSIONS.share?.ceiling ?? 0.76);
-  state.drives = state.drives && typeof state.drives === 'object' ? state.drives : {};
-  const before = Number(state.drives.share ?? 0);
-  const after = Number(Math.min(ceiling, before + delta).toFixed(4));
-  if (after !== before) {
-    state.drives.share = after;
-    state.revision = Number(state.revision ?? 0) + 1;
+  const reliefRatio = Math.min(NIGHT_DREAM_DRIVE_NUDGE_CAP, 0.02 + strength * 0.02);
+  state.drives = state.drives && typeof state.drives === 'object' ? { ...state.drives } : {};
+
+  const relieve = (key) => {
+    const current = Number(state.drives[key] ?? 0);
+    if (!Number.isFinite(current) || current <= 0 || reliefRatio <= 0) return false;
+    const after = Math.max(0, Number((current * (1 - reliefRatio)).toFixed(4)));
+    if (after === current) return false;
+    state.drives[key] = after;
+    return true;
+  };
+
+  let changed = false;
+  if (projection.attachment === 'high') {
+    changed = relieve('possess') || changed;
+    changed = relieve('crave') || changed;
   }
+  if (projection.curiosity === 'high') {
+    changed = relieve('curiosity') || changed;
+  }
+  if (changed) state.revision = Number(state.revision ?? 0) + 1;
   return state;
 }
 
