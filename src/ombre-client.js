@@ -176,33 +176,27 @@ export class OmbreClient {
   }
 
   async storeDream(dream) {
-    if (!this.config.writeEnabled) return null;
-    const content = [
-      `梦境：${dream.dream}`,
-      `梦境余韵：${dream.residue}`,
-      `醒后意识：${dream.awareness}`,
-      '说明：这是睡眠结算产生的梦境，不是现实事件；调用外部记忆服务不等于醒来。'
-    ].join('\n');
-    if (this.config.transport === 'lmc5_bridge') {
-      const stableFingerprint = String(dream.fingerprint || createHash('sha256').update(content, 'utf8').digest('hex').slice(0, 24));
-      const result = await this.bridgePost('/bridge/xinchao/candidates', {
-        external_id: `dream:${stableFingerprint}`,
-        content_fingerprint: stableFingerprint,
-        title: `心潮梦境 · ${String(dream.createdAt ?? '').slice(0, 16).replace('T', ' ')}`,
-        content, category: 'episode', thread: 'reflection', importance: 5.5,
-        privacy_scope: 'personal', relation_terms: ['心潮', '梦境', dream.source ?? 'rules'],
-      });
-      return String(result.candidate_id ?? '');
+    // Night Dream and sleep doodles stay inside Xinchao. They must never become
+    // LMC dream candidates, canonical memory, or the next dream's source.
+    void dream;
+    return null;
+  }
+
+  async fetchHistoricalEpisode({
+    stateProjection = {},
+    recentSourceDates = [],
+    minChars = 2000,
+    maxChars = 6000,
+  } = {}) {
+    if (this.config.transport !== 'lmc5_bridge') {
+      throw new Error('historical episode requires lmc5_bridge transport');
     }
-    const result = await this.call(this.config.writeTool ?? 'hold', {
-      content,
-      tags: 'dream',
-      importance: 7,
-      auto: true,
-      source: 'xinchao-dream',
+    return this.bridgePost('/bridge/xinchao/historical-episode', {
+      state_projection: stateProjection,
+      recent_source_dates: recentSourceDates,
+      min_chars: minChars,
+      max_chars: maxChars,
     });
-    const text = extractText(result);
-    return text.match(/[a-f0-9]{12,}/i)?.[0] ?? null;
   }
 
   async storeActionExperience(action) {

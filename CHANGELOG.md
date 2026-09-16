@@ -2,6 +2,14 @@
 
 本项目遵循语义化版本。除非特别说明，所有外部模型、长期记忆、OAuth 与通知能力均保持默认关闭。
 
+## Unreleased
+
+- Night Dream 迁到心潮：`DREAM_NIGHT_MODE=off|apply`（默认 off），每天本地时区最多成功一次。`state.json` 同时保存 `lastNightDreamLocalDay`（成功日）和 `lastNightDreamAttemptLocalDay`（尝试日）；失败当天不再重试，04 点不在线允许 catch-up。
+- 原料来自 LMC `POST /bridge/xinchao/historical-episode` 的连续历史 episode，加上有限 band 状态投影；独立梦境 prompt，模型失败则 skip，不用规则模板假梦。
+- Dream 记录保存 `source_date` / `source_event_ids` / `state_projection` / `residue_text` / `residue_strength`（仅供展示）。成功后按投影做一次有界 **relief**：`attachment=high` 降 possess/crave，`curiosity=high` 降 curiosity；medium/low 不动。不无条件加 share。之后走现有衰减；不再使用 `pendingDreamResidue` / 18h TTL / 专用过期清理。
+- `consecutiveNightDreamMiss` 记在 `state.json`，给现有 LMC 巡逻用；Night Dream 关闭时清零。Dream 不再写入 LMC `dream_candidates`，不能成为 canonical memory，也不能成为下轮 episode source。
+- 现有 `exclude_sources: ['xinchao']` 防自循环保持不变。
+
 ## 2.5.15-lmc.1 — 2026-09-04
 
 - 新增 MCP 工具 `mind_presence`：UserPromptSubmit 在每个真实 user turn 开始时上报在场，不要求 `interaction_type`，不上传用户文本。

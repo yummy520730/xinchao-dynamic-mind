@@ -2,32 +2,32 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { OmbreClient } from '../src/ombre-client.js';
 
-test('automatic dream writes identify themselves and never impersonate manual memory', async () => {
+test('dream records stay inside Xinchao and are never queued as LMC candidates', async () => {
   const client = new OmbreClient({
     writeEnabled: true,
     readEnabled: false,
-    url: 'http://unused.invalid/mcp',
-    token: '',
-    breathMaxResults: 3,
-    breathMaxTokens: 800,
+    transport: 'lmc5_bridge',
+    bridgeUrl: 'https://memory.example.com',
+    bridgeToken: 'token',
   });
-  let captured;
-  client.call = async (name, args) => {
-    captured = { name, args };
+  let called = 0;
+  client.bridgePost = async () => {
+    called += 1;
+    return { candidate_id: 'should-not-exist' };
+  };
+  client.call = async () => {
+    called += 1;
     return { result: { content: [{ type: 'text', text: '已保存 abcdef123456' }] } };
   };
 
-  await client.storeDream({
+  const stored = await client.storeDream({
     dream: '一盏灯',
     residue: '安静',
     awareness: '记得回来',
   });
 
-  assert.equal(captured.name, 'hold');
-  assert.equal(captured.args.auto, true);
-  assert.equal(captured.args.source, 'xinchao-dream');
-  assert.equal(captured.args.importance, 7);
-  assert.equal(captured.args.tags, 'dream');
+  assert.equal(stored, null);
+  assert.equal(called, 0);
 });
 
 test('completed action experience uses a stable LMC candidate id across retries', async () => {
@@ -54,4 +54,30 @@ test('completed action experience uses a stable LMC candidate id across retries'
   assert.match(captured[0].payload.external_id, /^action:/);
   assert.equal(captured[0].payload.category, 'episode');
   assert.match(captured[0].payload.content, /已经发生的行动结果/);
+});
+
+
+test('historical episode requests contiguous LMC source with weak state projection only', async () => {
+  const client = new OmbreClient({
+    writeEnabled: false,
+    readEnabled: true,
+    transport: 'lmc5_bridge',
+    bridgeUrl: 'https://memory.example.com',
+    bridgeToken: 'token',
+  });
+  let captured;
+  client.bridgePost = async (path, payload) => {
+    captured = { path, payload };
+    return { status: 'ok', event_ids: [101, 102], source_date: '2026-08-18' };
+  };
+  const result = await client.fetchHistoricalEpisode({
+    stateProjection: { attachment: 'high', warmth: 'medium' },
+    recentSourceDates: ['2026-08-01'],
+    minChars: 2000,
+    maxChars: 6000,
+  });
+  assert.equal(captured.path, '/bridge/xinchao/historical-episode');
+  assert.deepEqual(captured.payload.state_projection, { attachment: 'high', warmth: 'medium' });
+  assert.deepEqual(captured.payload.recent_source_dates, ['2026-08-01']);
+  assert.equal(result.status, 'ok');
 });

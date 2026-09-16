@@ -79,11 +79,17 @@ function ensureStateShape(state) {
     : Array.from({ length: 24 }, () => 0);
   state.lastDreamAttemptAt ??= null;
   state.lastDreamMaterialFingerprint ??= null;
+  state.lastNightDreamLocalDay ??= null;
+  state.lastNightDreamAttemptLocalDay ??= null;
+  state.consecutiveNightDreamMiss = Number.isFinite(Number(state.consecutiveNightDreamMiss))
+    ? Math.max(0, Math.floor(Number(state.consecutiveNightDreamMiss)))
+    : 0;
+  delete state.pendingDreamResidue;
   state.recentDreams = Array.isArray(state.recentDreams) ? state.recentDreams : [];
   if (previousSchemaVersion < 9) {
     state.recentDreams = collapseDuplicateDreamHistory(state.recentDreams);
   }
-  state.schemaVersion = Math.max(13, previousSchemaVersion);
+  state.schemaVersion = Math.max(14, previousSchemaVersion);
   return state;
 }
 
@@ -330,7 +336,7 @@ function applySessionOverlay(state, event, now) {
 export function newState(now = new Date()) {
   const at = iso(now);
   return {
-    schemaVersion: 13,
+    schemaVersion: 14,
     revision: 0,
     consciousness: 'awake',
     lastConversationAt: at,
@@ -344,6 +350,9 @@ export function newState(now = new Date()) {
     dreamUsage: {},
     lastDreamAttemptAt: null,
     lastDreamMaterialFingerprint: null,
+    lastNightDreamLocalDay: null,
+    lastNightDreamAttemptLocalDay: null,
+    consecutiveNightDreamMiss: 0,
     lastBarkAt: null,
     lastDreamBarkAt: null,
     lastAutonomousBarkAt: null,

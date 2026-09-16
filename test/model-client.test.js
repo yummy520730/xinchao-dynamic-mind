@@ -58,3 +58,50 @@ test('dream wake also lets the official model choose silence', async () => {
   });
   assert.deepEqual(result, { send: false, message: '', source: 'model' });
 });
+
+
+test('night dream skips when the model is unavailable instead of using a template', async () => {
+  const client = new ModelClient(modelConfig({ enabled: false, apiKey: '' }));
+  await assert.rejects(
+    () => client.generateNightDream({
+      episode: { source_date: '2026-08-18', event_ids: [1], messages: [] },
+      stateProjection: { attachment: 'high' },
+    }),
+    /night dream model is unavailable/,
+  );
+});
+
+
+test('night dream uses an independent writer prompt and never the daily summarizer', async () => {
+  const client = new ModelClient(modelConfig());
+  let requestBody;
+  client.request = async (body) => {
+    requestBody = body;
+    return {
+      ok: true,
+      json: async () => ({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              dream: '雨后的旧街把风铃吹成一条弯路，有人始终走在半步之外，屋檐下的雨比人声更密，门缝里还温着一点光。',
+              residue: '想靠近',
+              residue_strength: 0.4,
+            }),
+          },
+        }],
+      }),
+    };
+  };
+  const result = await client.generateNightDream({
+    episode: {
+      source_date: '2026-08-18',
+      event_ids: [101, 102],
+      messages: [{ role: 'user', content: '旧书店' }],
+    },
+    stateProjection: { attachment: 'high' },
+  });
+  assert.equal(result.source, 'night_model');
+  assert.match(requestBody.messages[1].content, /这是梦，不是事实总结/);
+  assert.doesNotMatch(requestBody.messages[1].content, /当天叙事|ledger_status|Daily summarizer/);
+  assert.equal(result.dream.includes('旧街'), true);
+});
