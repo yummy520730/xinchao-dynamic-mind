@@ -45,6 +45,12 @@ export function loadConfig() {
     dreamMaxPerDay: number('DREAM_MAX_PER_DAY', 4, 1, 12),
     dreamDuplicateThreshold: number('DREAM_DUPLICATE_THRESHOLD', 0.62, 0.4, 1),
     dreamRetryAttempts: number('DREAM_RETRY_ATTEMPTS', 3, 1, 5),
+    dreamNight: {
+      mode: (process.env.DREAM_NIGHT_MODE ?? 'off').trim().toLowerCase(),
+      hour: number('DREAM_NIGHT_HOUR', 4, 0, 23),
+      maxSourceChars: number('DREAM_NIGHT_MAX_SOURCE_CHARS', 6000, 800, 12000),
+      maxOutputChars: number('DREAM_NIGHT_MAX_OUTPUT_CHARS', 400, 120, 800),
+    },
     ombre: {
       transport: process.env.MEMORY_TRANSPORT ?? 'lmc5_bridge',
       url: process.env.MEMORY_MCP_URL ?? process.env.OMBRE_MCP_URL ?? '',
@@ -200,6 +206,11 @@ export function validateConfig(config) {
       throw new Error('SYNC_ENGINE_TOKEN must be independent from service, dashboard and bridge tokens');
     }
   }
+  const nightMode = String(config.dreamNight?.mode ?? 'off');
+  if (!['off', 'apply'].includes(nightMode)) {
+    throw new Error('DREAM_NIGHT_MODE must be off or apply');
+  }
+  if (config.dreamNight) config.dreamNight.mode = nightMode;
   const externalMemoryEnabled = Boolean(
     config.ombre.readEnabled
     || config.ombre.writeEnabled

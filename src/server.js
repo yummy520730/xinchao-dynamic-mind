@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { loadConfig, validateConfig } from './config.js';
 import { INTERACTION_TYPES, applyDriveFeedback, applyMemoryResonance, applyOmbreHeartbeat, barkAllowed, breathDreamContext, compactProjection, completeAction, daytimeEmergenceAllowed, dreamAllowed, dreamDuplicateCheck, dreamMaterialFingerprint, newState, observeSilenceThreshold, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, recordDreamAttempt, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleAndApplyStateSignal, settleState, topDrives } from './engine.js';
+import { applyNightDreamResidue, nightDreamDue, recordNightDream, runNightDream } from './night-dream.js';
 import { selectUniqueBark } from './bark-dedupe.js';
 import { StateStore } from './state-store.js';
 import { ModelClient } from './model-client.js';
@@ -151,7 +152,37 @@ async function runCycle() {
     const evaluatedDrive = pickIntent(state);
     const evaluateDriveOnce = () => evaluatedDrive;
 
-    if (dreamAllowed(state, now, config.dreamMinIntervalHours, config.dreamMaxPerDay)) {
+    const nightOptions = {
+      mode: config.dreamNight.mode,
+      hour: config.dreamNight.hour,
+      timeZone: config.settle.timeZone,
+    };
+    if (nightDreamDue(state, now, nightOptions)) {
+      const night = await runNightDream({ state, now, config, ombre, model, log });
+      if (night.status === 'ok') {
+        state = await updateState({
+          type: 'night_dream_recorded',
+          source: 'night_model',
+          details: { dreamCreated: true, kind: 'night' },
+          at: now,
+        }, (latest) => {
+          if (!nightDreamDue(latest, now, nightOptions)) return latest;
+          let next = recordNightDream(latest, night.dream, now, config.settle.timeZone);
+          next = applyNightDreamResidue(next, night.dream, now);
+          return next;
+        });
+        dreamCreated = true;
+        log('night_dream_settled', {
+          sourceDate: night.dream.source_date,
+          eventIds: night.dream.source_event_ids?.length ?? 0,
+          revision: state.revision,
+        });
+      } else {
+        log('night_dream_skipped', { reason: night.reason ?? night.status, revision: state.revision });
+      }
+    }
+
+    if (config.dreamNight.mode !== 'apply' && dreamAllowed(state, now, config.dreamMinIntervalHours, config.dreamMaxPerDay)) {
       let material = '';
       let materialSignals = [];
       if (!config.shadowMode && config.ombre.readEnabled) {

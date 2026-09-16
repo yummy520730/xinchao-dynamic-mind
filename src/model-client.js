@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { nightDreamWriterPrompt, validateNightDreamOutput } from './night-dream.js';
 
 const RULE_DREAM_SCENES = Object.freeze([
   '梦里是一条雨后的旧街，路灯映在积水里。有人始终走在半步之外，每次快要追上，街角就又多出一段路。',
@@ -131,6 +132,55 @@ export class ModelClient {
       lucidity: normalizedLucidity(parsed.lucidity),
       source: 'model',
       model: this.config.name
+    };
+  }
+
+  async generateNightDream({ episode, stateProjection, maxOutputChars = 400 }) {
+    if (!this.config.enabled || !this.config.apiKey) {
+      const error = new Error('night dream model is unavailable');
+      error.code = 'night_dream_skip';
+      throw error;
+    }
+    const prompt = nightDreamWriterPrompt({
+      episode,
+      stateProjection,
+      agentName: this.agentName,
+    });
+    const body = {
+      model: this.config.name,
+      messages: [
+        { role: 'system', content: '你是心潮的夜梦书写者。写梦，不写事实，不提取记忆。' },
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0.95,
+      max_tokens: Math.min(700, this.config.maxOutputTokens),
+      thinking: { type: 'disabled' },
+      response_format: { type: 'json_object' },
+    };
+    let response = await this.request(body);
+    if (!response.ok && [400, 422].includes(response.status)) {
+      delete body.response_format;
+      response = await this.request(body);
+    }
+    if (!response.ok) {
+      const error = new Error(`night dream model request failed: HTTP ${response.status}`);
+      error.code = 'night_dream_skip';
+      throw error;
+    }
+    const payload = await response.json();
+    const parsed = parseJson(payload.choices?.[0]?.message?.content ?? '');
+    const validated = validateNightDreamOutput(parsed, maxOutputChars);
+    if (!validated) {
+      const error = new Error('night dream model returned empty dream');
+      error.code = 'night_dream_skip';
+      throw error;
+    }
+    return {
+      ...validated,
+      awareness: '',
+      lucidity: 0.12,
+      source: 'night_model',
+      model: this.config.name,
     };
   }
 

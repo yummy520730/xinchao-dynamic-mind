@@ -34,6 +34,13 @@ function config(overrides = {}) {
       token: '',
       ...(overrides.syncEvents || {}),
     },
+    dreamNight: {
+      mode: 'off',
+      hour: 4,
+      maxSourceChars: 6000,
+      maxOutputChars: 400,
+      ...(overrides.dreamNight || {}),
+    },
   };
 }
 
@@ -67,6 +74,13 @@ for (const enabled of [
   });
 }
 
+
+test('night dream mode rejects unknown values', () => {
+  assert.throws(
+    () => validateConfig(config({ dreamNight: { mode: 'dry_run' } })),
+    /DREAM_NIGHT_MODE/,
+  );
+});
 
 test('authenticated external memory configuration is accepted', () => {
   const value = config({

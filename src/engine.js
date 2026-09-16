@@ -79,6 +79,10 @@ function ensureStateShape(state) {
     : Array.from({ length: 24 }, () => 0);
   state.lastDreamAttemptAt ??= null;
   state.lastDreamMaterialFingerprint ??= null;
+  state.lastNightDreamLocalDay ??= null;
+  state.pendingDreamResidue = state.pendingDreamResidue && typeof state.pendingDreamResidue === 'object'
+    ? state.pendingDreamResidue
+    : null;
   state.recentDreams = Array.isArray(state.recentDreams) ? state.recentDreams : [];
   if (previousSchemaVersion < 9) {
     state.recentDreams = collapseDuplicateDreamHistory(state.recentDreams);
@@ -344,6 +348,8 @@ export function newState(now = new Date()) {
     dreamUsage: {},
     lastDreamAttemptAt: null,
     lastDreamMaterialFingerprint: null,
+    lastNightDreamLocalDay: null,
+    pendingDreamResidue: null,
     lastBarkAt: null,
     lastDreamBarkAt: null,
     lastAutonomousBarkAt: null,
@@ -452,6 +458,12 @@ export function settleState(input, now = new Date(), sleepAfterMinutes = 90, opt
   const elapsedHours = Math.max(0, (nowMs - Date.parse(state.lastSettledAt)) / 3_600_000);
   let changed = elapsedHours > 0 || originalSchemaVersion < state.schemaVersion;
   if (pruneExpiredSessionOverlays(state, now) > 0) changed = true;
+
+  const residueExpires = Date.parse(state.pendingDreamResidue?.expiresAt ?? '');
+  if (state.pendingDreamResidue && (!Number.isFinite(residueExpires) || residueExpires <= nowMs)) {
+    state.pendingDreamResidue = null;
+    changed = true;
+  }
 
   // Wall-clock settlement owns only observable environment state. Drives,
   // thoughts and fatigue may change only when an explicit event/wake evaluates
