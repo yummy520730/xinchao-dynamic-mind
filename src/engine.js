@@ -80,14 +80,16 @@ function ensureStateShape(state) {
   state.lastDreamAttemptAt ??= null;
   state.lastDreamMaterialFingerprint ??= null;
   state.lastNightDreamLocalDay ??= null;
-  state.pendingDreamResidue = state.pendingDreamResidue && typeof state.pendingDreamResidue === 'object'
-    ? state.pendingDreamResidue
-    : null;
+  state.lastNightDreamAttemptLocalDay ??= null;
+  state.consecutiveNightDreamMiss = Number.isFinite(Number(state.consecutiveNightDreamMiss))
+    ? Math.max(0, Math.floor(Number(state.consecutiveNightDreamMiss)))
+    : 0;
+  delete state.pendingDreamResidue;
   state.recentDreams = Array.isArray(state.recentDreams) ? state.recentDreams : [];
   if (previousSchemaVersion < 9) {
     state.recentDreams = collapseDuplicateDreamHistory(state.recentDreams);
   }
-  state.schemaVersion = Math.max(13, previousSchemaVersion);
+  state.schemaVersion = Math.max(14, previousSchemaVersion);
   return state;
 }
 
@@ -334,7 +336,7 @@ function applySessionOverlay(state, event, now) {
 export function newState(now = new Date()) {
   const at = iso(now);
   return {
-    schemaVersion: 13,
+    schemaVersion: 14,
     revision: 0,
     consciousness: 'awake',
     lastConversationAt: at,
@@ -349,7 +351,8 @@ export function newState(now = new Date()) {
     lastDreamAttemptAt: null,
     lastDreamMaterialFingerprint: null,
     lastNightDreamLocalDay: null,
-    pendingDreamResidue: null,
+    lastNightDreamAttemptLocalDay: null,
+    consecutiveNightDreamMiss: 0,
     lastBarkAt: null,
     lastDreamBarkAt: null,
     lastAutonomousBarkAt: null,
@@ -458,12 +461,6 @@ export function settleState(input, now = new Date(), sleepAfterMinutes = 90, opt
   const elapsedHours = Math.max(0, (nowMs - Date.parse(state.lastSettledAt)) / 3_600_000);
   let changed = elapsedHours > 0 || originalSchemaVersion < state.schemaVersion;
   if (pruneExpiredSessionOverlays(state, now) > 0) changed = true;
-
-  const residueExpires = Date.parse(state.pendingDreamResidue?.expiresAt ?? '');
-  if (state.pendingDreamResidue && (!Number.isFinite(residueExpires) || residueExpires <= nowMs)) {
-    state.pendingDreamResidue = null;
-    changed = true;
-  }
 
   // Wall-clock settlement owns only observable environment state. Drives,
   // thoughts and fatigue may change only when an explicit event/wake evaluates

@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import { DIMENSIONS } from './dimensions.js';
 import { localDayAndHour, recordDream } from './engine.js';
 
-export const NIGHT_DREAM_TTL_HOURS = 18;
 export const NIGHT_DREAM_MIN_CHARS = 150;
 export const NIGHT_DREAM_MAX_CHARS = 400;
+export const NIGHT_DREAM_DRIVE_NUDGE_CAP = 0.04;
 
 const BANDS = Object.freeze(['low', 'medium', 'high']);
 
@@ -39,14 +40,40 @@ export function nightDreamDue(state, now, options) {
   if (String(options?.mode ?? 'off') !== 'apply') return false;
   const { day, hour } = localDayAndHour(now, options.timeZone ?? 'Asia/Shanghai');
   if (hour < Number(options.hour ?? 4)) return false;
-  return String(state?.lastNightDreamLocalDay ?? '') !== day;
+  if (String(state?.lastNightDreamLocalDay ?? '') === day) return false;
+  if (String(state?.lastNightDreamAttemptLocalDay ?? '') === day) return false;
+  return true;
+}
+
+export function recordNightDreamAttempt(input, now, timeZone = 'Asia/Shanghai') {
+  const state = structuredClone(input);
+  const { day } = localDayAndHour(now, timeZone);
+  state.lastNightDreamAttemptLocalDay = day;
+  return state;
+}
+
+export function recordNightDreamMiss(input, now, timeZone = 'Asia/Shanghai') {
+  const state = recordNightDreamAttempt(input, now, timeZone);
+  state.consecutiveNightDreamMiss = Math.max(0, Math.floor(Number(state.consecutiveNightDreamMiss) || 0)) + 1;
+  state.revision = Number(state.revision ?? 0) + 1;
+  return state;
 }
 
 export function recordNightDream(input, dream, now, timeZone = 'Asia/Shanghai') {
   const next = recordDream(input, dream);
   const { day } = localDayAndHour(now, timeZone);
   next.lastNightDreamLocalDay = day;
+  next.lastNightDreamAttemptLocalDay = day;
+  next.consecutiveNightDreamMiss = 0;
   return next;
+}
+
+export function clearNightDreamMissIfDisabled(input, mode) {
+  if (String(mode ?? 'off') === 'apply') return input;
+  if (!Number(input?.consecutiveNightDreamMiss)) return input;
+  const state = structuredClone(input);
+  state.consecutiveNightDreamMiss = 0;
+  return state;
 }
 
 export function recentNightDreamSourceDates(state, limit = 8) {
@@ -56,31 +83,16 @@ export function recentNightDreamSourceDates(state, limit = 8) {
     .slice(-Math.max(1, limit));
 }
 
-export function applyNightDreamResidue(input, dream, now = new Date()) {
+export function applyNightDreamDriveNudge(input, dream) {
   const state = structuredClone(input);
   const strength = clamp01(dream?.residue_strength ?? dream?.residueStrength ?? 0.3);
-  const delta = Math.min(0.04, 0.02 + strength * 0.02);
-  const before = Number(state.drives?.share ?? 0);
-  const after = Number(Math.min(0.9, before + delta).toFixed(4));
+  const delta = Math.min(NIGHT_DREAM_DRIVE_NUDGE_CAP, 0.02 + strength * 0.02);
+  const ceiling = Number(DIMENSIONS.share?.ceiling ?? 0.76);
+  state.drives = state.drives && typeof state.drives === 'object' ? state.drives : {};
+  const before = Number(state.drives.share ?? 0);
+  const after = Number(Math.min(ceiling, before + delta).toFixed(4));
   if (after !== before) {
     state.drives.share = after;
-    state.revision = Number(state.revision ?? 0) + 1;
-  }
-  state.pendingDreamResidue = {
-    text: String(dream?.residue_text ?? dream?.residue ?? '').slice(0, 240),
-    strength,
-    ttl_hours: NIGHT_DREAM_TTL_HOURS,
-    expiresAt: new Date(now.getTime() + NIGHT_DREAM_TTL_HOURS * 3_600_000).toISOString(),
-  };
-  return state;
-}
-
-export function expireDreamResidue(input, now = new Date()) {
-  const state = structuredClone(input);
-  const expiresAt = Date.parse(state.pendingDreamResidue?.expiresAt ?? '');
-  if (!state.pendingDreamResidue) return state;
-  if (!Number.isFinite(expiresAt) || expiresAt <= now.getTime()) {
-    state.pendingDreamResidue = null;
     state.revision = Number(state.revision ?? 0) + 1;
   }
   return state;

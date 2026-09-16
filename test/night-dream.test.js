@@ -2,12 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { newState } from '../src/engine.js';
 import {
-  applyNightDreamResidue,
+  applyNightDreamDriveNudge,
+  clearNightDreamMissIfDisabled,
   nightDreamDue,
   nightDreamWriterPrompt,
   projectDreamState,
   recentNightDreamSourceDates,
   recordNightDream,
+  recordNightDreamMiss,
   runNightDream,
   validateNightDreamOutput,
 } from '../src/night-dream.js';
@@ -35,6 +37,8 @@ test('successful night dream is durable across restart ticks the same local day'
   };
   state = recordNightDream(state, dream, now, 'Asia/Shanghai');
   assert.equal(state.lastNightDreamLocalDay, '2026-09-16');
+  assert.equal(state.lastNightDreamAttemptLocalDay, '2026-09-16');
+  assert.equal(state.consecutiveNightDreamMiss, 0);
   const options = { mode: 'apply', hour: 4, timeZone: 'Asia/Shanghai' };
   assert.equal(nightDreamDue(state, now, options), false);
   assert.equal(nightDreamDue(state, new Date('2026-09-16T02:00:00Z'), options), false);
@@ -195,14 +199,91 @@ test('empty model output is rejected', () => {
 });
 
 
-test('residue only applies a small decaying influence', () => {
+test('failed night dream is not retried the same local day', async () => {
+  const now = new Date('2026-09-15T20:05:00Z');
+  const options = { mode: 'apply', hour: 4, timeZone: 'Asia/Shanghai' };
+  const failed = await runNightDream({
+    state: newState(now),
+    now,
+    config: {
+      dreamNight: { mode: 'apply', hour: 4, maxSourceChars: 6000, maxOutputChars: 400 },
+      settle: { timeZone: 'Asia/Shanghai' },
+    },
+    ombre: {
+      fetchHistoricalEpisode: async () => ({
+        status: 'ok',
+        source_date: '2026-08-18',
+        event_ids: [101, 102],
+        messages: [{ role: 'user', content: '旧书店' }],
+      }),
+    },
+    model: {
+      generateNightDream: async () => {
+        throw Object.assign(new Error('boom'), { code: 'night_dream_skip' });
+      },
+    },
+  });
+  assert.equal(failed.status, 'skipped');
+  const state = recordNightDreamMiss(newState(now), now, 'Asia/Shanghai');
+  assert.equal(state.lastNightDreamAttemptLocalDay, '2026-09-16');
+  assert.equal(state.lastNightDreamLocalDay, null);
+  assert.equal(state.consecutiveNightDreamMiss, 1);
+  assert.equal(nightDreamDue(state, now, options), false);
+  let fetched = 0;
+  const retry = await runNightDream({
+    state,
+    now,
+    config: {
+      dreamNight: { mode: 'apply', hour: 4, maxSourceChars: 6000, maxOutputChars: 400 },
+      settle: { timeZone: 'Asia/Shanghai' },
+    },
+    ombre: {
+      fetchHistoricalEpisode: async () => {
+        fetched += 1;
+        return { status: 'ok', event_ids: [1, 2] };
+      },
+    },
+    model: {
+      generateNightDream: async () => ({ dream: '不应出现', source: 'night_model' }),
+    },
+  });
+  assert.equal(retry.status, 'not_due');
+  assert.equal(fetched, 0);
+});
+
+
+test('consecutive miss resets on success and clears when night dream is off', () => {
+  const now = new Date('2026-09-15T20:20:00Z');
+  let state = recordNightDreamMiss(newState(now), now, 'Asia/Shanghai');
+  state = recordNightDreamMiss(state, new Date('2026-09-16T20:20:00Z'), 'Asia/Shanghai');
+  state = recordNightDreamMiss(state, new Date('2026-09-17T20:20:00Z'), 'Asia/Shanghai');
+  assert.equal(state.consecutiveNightDreamMiss, 3);
+  state = recordNightDream(state, {
+    id: 'n-ok',
+    createdAt: now.toISOString(),
+    dream: '成功的一夜',
+    residue: '想靠近',
+    residue_strength: 0.4,
+    source_date: '2026-08-18',
+    source_event_ids: [101, 102],
+  }, now, 'Asia/Shanghai');
+  assert.equal(state.consecutiveNightDreamMiss, 0);
+  state.consecutiveNightDreamMiss = 5;
+  const cleared = clearNightDreamMissIfDisabled(state, 'off');
+  assert.equal(cleared.consecutiveNightDreamMiss, 0);
+  assert.equal(clearNightDreamMissIfDisabled(state, 'apply').consecutiveNightDreamMiss, 5);
+});
+
+
+test('successful night dream only nudges existing drives once, without residue TTL', () => {
   const now = new Date('2026-09-16T04:10:00Z');
   const before = newState(now);
   const share = before.drives.share;
-  const after = applyNightDreamResidue(before, {
+  const after = applyNightDreamDriveNudge(before, {
     residue: '昨夜那段旧聊天留下了一点想靠近的感觉',
     residue_strength: 0.42,
-  }, now);
+  });
   assert.ok(after.drives.share - share <= 0.04 + 1e-9);
-  assert.equal(after.pendingDreamResidue.ttl_hours, 18);
+  assert.equal(after.pendingDreamResidue, undefined);
+  assert.equal(Object.hasOwn(after, 'pendingDreamResidue'), false);
 });

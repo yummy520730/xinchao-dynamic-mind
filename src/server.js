@@ -1,8 +1,8 @@
 import { createServer } from 'node:http';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { loadConfig, validateConfig } from './config.js';
-import { INTERACTION_TYPES, applyDriveFeedback, applyMemoryResonance, applyOmbreHeartbeat, barkAllowed, breathDreamContext, compactProjection, completeAction, daytimeEmergenceAllowed, dreamAllowed, dreamDuplicateCheck, dreamMaterialFingerprint, newState, observeSilenceThreshold, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, recordDreamAttempt, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleAndApplyStateSignal, settleState, topDrives } from './engine.js';
-import { applyNightDreamResidue, nightDreamDue, recordNightDream, runNightDream } from './night-dream.js';
+import { INTERACTION_TYPES, applyDriveFeedback, applyMemoryResonance, applyOmbreHeartbeat, barkAllowed, breathDreamContext, compactProjection, completeAction, daytimeEmergenceAllowed, dreamAllowed, dreamDuplicateCheck, dreamMaterialFingerprint, localDayAndHour, newState, observeSilenceThreshold, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, recordDreamAttempt, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleAndApplyStateSignal, settleState, topDrives } from './engine.js';
+import { applyNightDreamDriveNudge, clearNightDreamMissIfDisabled, nightDreamDue, recordNightDream, recordNightDreamMiss, runNightDream } from './night-dream.js';
 import { selectUniqueBark } from './bark-dedupe.js';
 import { StateStore } from './state-store.js';
 import { ModelClient } from './model-client.js';
@@ -157,8 +157,17 @@ async function runCycle() {
       hour: config.dreamNight.hour,
       timeZone: config.settle.timeZone,
     };
-    if (nightDreamDue(state, now, nightOptions)) {
+    if (config.dreamNight.mode !== 'apply') {
+      if (Number(state.consecutiveNightDreamMiss) > 0) {
+        state = await updateState({
+          type: 'night_dream_disabled',
+          source: 'timer',
+          at: now,
+        }, (latest) => clearNightDreamMissIfDisabled(latest, config.dreamNight.mode));
+      }
+    } else if (nightDreamDue(state, now, nightOptions)) {
       const night = await runNightDream({ state, now, config, ombre, model, log });
+      const { day } = localDayAndHour(now, config.settle.timeZone);
       if (night.status === 'ok') {
         state = await updateState({
           type: 'night_dream_recorded',
@@ -166,9 +175,9 @@ async function runCycle() {
           details: { dreamCreated: true, kind: 'night' },
           at: now,
         }, (latest) => {
-          if (!nightDreamDue(latest, now, nightOptions)) return latest;
+          if (String(latest.lastNightDreamLocalDay ?? '') === day) return latest;
           let next = recordNightDream(latest, night.dream, now, config.settle.timeZone);
-          next = applyNightDreamResidue(next, night.dream, now);
+          next = applyNightDreamDriveNudge(next, night.dream);
           return next;
         });
         dreamCreated = true;
@@ -177,7 +186,16 @@ async function runCycle() {
           eventIds: night.dream.source_event_ids?.length ?? 0,
           revision: state.revision,
         });
-      } else {
+      } else if (night.status !== 'not_due') {
+        state = await updateState({
+          type: 'night_dream_attempted',
+          source: 'night_model',
+          details: { reason: night.reason ?? night.status },
+          at: now,
+        }, (latest) => {
+          if (String(latest.lastNightDreamAttemptLocalDay ?? '') === day) return latest;
+          return recordNightDreamMiss(latest, now, config.settle.timeZone);
+        });
         log('night_dream_skipped', { reason: night.reason ?? night.status, revision: state.revision });
       }
     }
