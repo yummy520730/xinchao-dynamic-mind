@@ -81,3 +81,50 @@ test('historical episode requests contiguous LMC source with weak state projecti
   assert.deepEqual(captured.payload.recent_source_dates, ['2026-08-01']);
   assert.equal(result.status, 'ok');
 });
+
+test('historical events request exact LMC ids and date without search fallback', async () => {
+  const client = new OmbreClient({
+    writeEnabled: false,
+    readEnabled: true,
+    transport: 'lmc5_bridge',
+    bridgeUrl: 'https://memory.example.com',
+    bridgeToken: 'token',
+  });
+  let captured;
+  client.bridgePost = async (path, payload) => {
+    captured = { path, payload };
+    return {
+      status: 'ok',
+      source_date: '2026-07-12',
+      requested_count: 84,
+      returned_count: 84,
+      missing_count: 0,
+      messages: [{ role: 'user', content: '门口还挂着风铃。', created_at: '2026-07-12T06:20:00+00:00' }],
+    };
+  };
+  const result = await client.fetchHistoricalEvents({
+    eventIds: [1000, 1001],
+    sourceDate: '2026-07-12',
+  });
+  assert.equal(captured.path, '/bridge/xinchao/historical-events');
+  assert.deepEqual(captured.payload, { event_ids: [1000, 1001], source_date: '2026-07-12' });
+  assert.equal(result.status, 'ok');
+  assert.equal(result.returned_count, 84);
+});
+
+test('historical events refuse non-bridge transports instead of searching', async () => {
+  const client = new OmbreClient({
+    writeEnabled: false,
+    readEnabled: true,
+    transport: 'mcp',
+    url: 'https://memory.example.com/mcp',
+    token: 'token',
+  });
+  client.call = async () => {
+    throw new Error('must not fall back to recall');
+  };
+  await assert.rejects(
+    () => client.fetchHistoricalEvents({ eventIds: [1, 2], sourceDate: '2026-07-12' }),
+    /lmc5_bridge/,
+  );
+});

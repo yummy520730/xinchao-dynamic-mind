@@ -17,6 +17,12 @@ import { OAuthProvider } from './oauth-provider.js';
 import { recordHandoffNote } from './handoff-notes.js';
 import { DashboardAuth } from './dashboard-auth.js';
 import { buildConnectionManifest, buildDashboardSnapshot } from './dashboard-projection.js';
+import {
+  dreamHasHistoricalProvenance,
+  findRecentDream,
+  historicalSourceUnavailable,
+  mapDreamSourceResponse,
+} from './dashboard-dream-source.js';
 import { BRIDGE_SERVER_PROTOCOL, BRIDGE_STREAM_PROTOCOL, BridgeQueue } from './bridge-queue.js';
 import { FromMeStore } from './from-me-store.js';
 import { XinchaoSyncEvents } from './sync-events.js';
@@ -639,6 +645,39 @@ async function dashboardPayload(pathname, url) {
   return null;
 }
 
+async function dashboardDreamSource(dreamId) {
+  const state = await store.read();
+  const revision = Number(state?.revision ?? 0);
+  const dream = findRecentDream(state, dreamId);
+  if (!dream) return { status: 404, body: { error: 'not found' } };
+  if (!dreamHasHistoricalProvenance(dream)) {
+    return { status: 409, body: { error: 'dream source unavailable' } };
+  }
+  try {
+    const lmc = await ombre.fetchHistoricalEvents({
+      eventIds: dream.source_event_ids,
+      sourceDate: dream.source_date,
+    });
+    const payload = mapDreamSourceResponse(lmc, dream);
+    const after = await store.read();
+    log('dream_source_read', {
+      dream: auditEventFingerprint(dream.id),
+      status: payload.status,
+      returned: payload.returnedEventCount,
+      missing: payload.missingEventCount,
+      revisionUnchanged: Number(after?.revision ?? 0) === revision,
+    });
+    return { status: 200, body: payload };
+  } catch (error) {
+    const failure = historicalSourceUnavailable(error);
+    log('dream_source_unavailable', {
+      dream: auditEventFingerprint(dream.id),
+      message: String(error.message ?? '').slice(0, 160),
+    });
+    return { status: failure.status, body: { error: failure.error } };
+  }
+}
+
 function sendMcp(response, status, value, extraHeaders = {}) {
   const headers = {
     'Cache-Control': 'no-store',
@@ -1144,6 +1183,11 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === 'GET' && url.pathname.startsWith('/v1/dashboard/')) {
+      const dreamSourceMatch = url.pathname.match(/^\/v1\/dashboard\/dreams\/([^/]+)\/source$/);
+      if (dreamSourceMatch) {
+        const result = await dashboardDreamSource(decodeURIComponent(dreamSourceMatch[1]));
+        return send(response, result.status, result.body);
+      }
       const payload = await dashboardPayload(url.pathname, url);
       return payload ? send(response, 200, payload) : send(response, 404, { error: 'not found' });
     }
