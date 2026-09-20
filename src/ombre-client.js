@@ -199,6 +199,16 @@ export class OmbreClient {
     });
   }
 
+  async fetchHistoricalEvents({ eventIds, sourceDate } = {}) {
+    if (this.config.transport !== 'lmc5_bridge') {
+      throw new Error('historical source requires lmc5_bridge transport');
+    }
+    return this.bridgePost('/bridge/xinchao/historical-events', {
+      event_ids: eventIds,
+      source_date: sourceDate,
+    });
+  }
+
   async storeActionExperience(action) {
     if (!this.config.writeEnabled) return null;
     const eventId = String(action.eventId ?? action.event_id ?? '').trim();
