@@ -50,6 +50,22 @@ function projectedThoughts(state) {
   };
 }
 
+function boundedMultiline(value, maxLength) {
+  const text = String(value ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+  if (!text) return '';
+  return text.slice(0, maxLength);
+}
+
+function projectedSourceDate(value) {
+  const text = String(value ?? '').trim();
+  const match = text.match(/^(\d{4}-\d{2}-\d{2})/);
+  return match ? match[1] : null;
+}
+
+function projectedSourceEventCount(value) {
+  return Array.isArray(value) ? value.length : null;
+}
+
 function projectedDreams(state, includePrivateText, limit = 12) {
   const dreams = Array.isArray(state?.recentDreams) ? state.recentDreams : [];
   return dreams.slice(-Math.max(1, Math.min(30, Number(limit) || 12))).reverse().map((dream) => {
@@ -67,8 +83,13 @@ function projectedDreams(state, includePrivateText, limit = 12) {
       hasSummary: Boolean(summary),
       hasAwareness: Boolean(compact(dream?.awareness)),
       lucidity,
+      kind: compact(dream?.kind, 40) || null,
+      sourceDate: projectedSourceDate(dream?.source_date),
+      sourceStartAt: validDate(dream?.source_start_at),
+      sourceEndAt: validDate(dream?.source_end_at),
+      sourceEventCount: projectedSourceEventCount(dream?.source_event_ids),
       ...(includePrivateText ? {
-        dream: compact(dream?.dream, 4000) || null,
+        dream: boundedMultiline(dream?.dream, 4000) || null,
         summary,
         residue: compact(dream?.residue, 1200) || null,
         awareness: compact(dream?.awareness, 1200) || null,
@@ -76,6 +97,7 @@ function projectedDreams(state, includePrivateText, limit = 12) {
     };
   });
 }
+
 
 function activeSessionCount(state, now) {
   return Object.values(state?.sessionOverlays ?? {}).filter((session) => {
