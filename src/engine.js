@@ -50,6 +50,23 @@ const INTERACTION_EFFECTS = Object.freeze({
   reassurance: { relief: { grieve: 0.20, anger: 0.08, monitor: 0.05 } },
 });
 
+// Small, clamped session moves. Clients report interaction_type only; they do
+// not get to invent warmth/attention scores. Explicit legacy sessionState still
+// wins so older callers keep their absolute overlay writes.
+export const SESSION_TRANSITIONS = Object.freeze({
+  companionship: Object.freeze({ warmth: 0.04, attention: 0.03, tone: 'warm' }),
+  affection: Object.freeze({ warmth: 0.08, tension: -0.04, tone: 'warm' }),
+  intimacy: Object.freeze({ warmth: 0.08, attention: 0.06, tension: -0.04, tone: 'warm' }),
+  sharing: Object.freeze({ attention: 0.04 }),
+  discovery: Object.freeze({ attention: 0.08, confidence: 0.04, tone: 'focused' }),
+  task_progress: Object.freeze({ attention: 0.04, confidence: 0.08, tone: 'focused' }),
+  reflection: Object.freeze({ attention: 0.04, tone: 'calm' }),
+  conflict: Object.freeze({ tension: 0.10, warmth: -0.04, confidence: -0.04, tone: 'conflicted' }),
+  loss: Object.freeze({ tension: 0.05, warmth: -0.04, tone: 'guarded' }),
+  reconciliation: Object.freeze({ tension: -0.08, warmth: 0.08, confidence: 0.04, tone: 'warm' }),
+  reassurance: Object.freeze({ tension: -0.08, warmth: 0.04, tone: 'calm' }),
+});
+
 function ensureStateShape(state) {
   const previousSchemaVersion = Number(state.schemaVersion) || 0;
   state.sessionOverlays ??= {};
@@ -145,14 +162,30 @@ function interactionAlreadyProcessed(state, eventId) {
   );
 }
 
-function recordConversationEventFingerprint(state, eventId, type, now) {
+function cleanInteractionId(event) {
+  return String(event?.interactionId ?? event?.interaction_id ?? '').replace(/\s+/g, ' ').trim().slice(0, 160);
+}
+
+function settledInteractionRecord(state, interactionFingerprint) {
+  if (!interactionFingerprint || !Array.isArray(state?.recentConversationEvents)) return null;
+  return state.recentConversationEvents.find((item) => (
+    item?.interactionFingerprint === interactionFingerprint && item?.settlement === 'settled'
+  )) ?? null;
+}
+
+function recordConversationEventFingerprint(state, eventId, type, now, extra = {}) {
   const fingerprint = eventFingerprint(eventId);
   if (!fingerprint) return;
+  const interactionFingerprint = extra.interactionFingerprint || null;
   state.recentConversationEvents = [
     ...state.recentConversationEvents,
     {
       eventFingerprint: fingerprint,
+      interactionFingerprint,
       interactionType: type || null,
+      settlement: extra.settlement || null,
+      priorInteractionType: extra.priorInteractionType || null,
+      disagreement: Boolean(extra.disagreement),
       processedAt: iso(now),
     },
   ].slice(-MAX_RECENT_CONVERSATION_EVENTS);
@@ -324,6 +357,18 @@ function applySessionOverlay(state, event, now) {
   current.updatedAt = iso(now);
   current.expiresAt = iso(new Date(now.getTime() + ttlMinutes * 60_000));
   current.lastEventId = String(event.eventId ?? event.event_id ?? '').trim().slice(0, 120);
+  const type = interactionType(event);
+  if (type && !explicitSessionControl(event)) {
+    const transition = SESSION_TRANSITIONS[type];
+    if (transition) {
+      for (const key of SESSION_FIELDS) {
+        if (!Number.isFinite(Number(transition[key]))) continue;
+        const base = Number(current[key] ?? (key === 'tension' ? 0 : 0.5));
+        current[key] = Number(clamp(base + Number(transition[key])).toFixed(4));
+      }
+      if (transition.tone && SESSION_TONES.has(transition.tone)) current.tone = transition.tone;
+    }
+  }
   const created = !state.sessionOverlays[sessionId];
   state.sessionOverlays[sessionId] = current;
   const entries = Object.entries(state.sessionOverlays)
@@ -331,6 +376,15 @@ function applySessionOverlay(state, event, now) {
     .slice(0, 64);
   state.sessionOverlays = Object.fromEntries(entries);
   return { sessionId, created };
+}
+
+function explicitSessionControl(event) {
+  const absolute = event?.sessionState ?? event?.windowState ?? {};
+  const deltas = event?.sessionDeltas ?? event?.windowDeltas ?? {};
+  if (String(absolute.tone ?? event?.sessionTone ?? '').trim()) return true;
+  return SESSION_FIELDS.some((key) => (
+    Number.isFinite(Number(absolute[key])) || Number.isFinite(Number(deltas[key]))
+  ));
 }
 
 export function newState(now = new Date()) {
@@ -503,6 +557,35 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
       },
     };
   }
+  const interactionFingerprint = type ? eventFingerprint(cleanInteractionId(event)) : '';
+  const priorSettlement = settledInteractionRecord(state, interactionFingerprint);
+  if (priorSettlement) {
+    const disagreement = priorSettlement.interactionType !== type;
+    if (eventId) {
+      recordConversationEventFingerprint(state, eventId, type, now, {
+        interactionFingerprint,
+        settlement: 'already_settled',
+        priorInteractionType: priorSettlement.interactionType || null,
+        disagreement,
+      });
+    }
+    return {
+      state,
+      changed: false,
+      duplicate: true,
+      wasSleeping: false,
+      sessionId,
+      sessionCreated: false,
+      interaction: {
+        type: type || null,
+        applied: false,
+        reasonCode: disagreement ? 'already_settled' : 'duplicate_interaction',
+        affectedDrives: [],
+        priorType: priorSettlement.interactionType || null,
+        disagreement,
+      },
+    };
+  }
   const wasSleeping = state.consciousness === 'sleeping';
   const previousConversationMs = Date.parse(input.lastConversationAt ?? '');
   // Presence-only heartbeats prove the user is around, nothing more. They must
@@ -579,7 +662,12 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
   // Presence-only heartbeats are not semantic interactions and return earlier.
   // Real conversation events — including presence with no interaction_type —
   // keep event_id fingerprints so retries cannot replay wake/anchor effects.
-  if (eventId) recordConversationEventFingerprint(state, eventId, type, now);
+  if (eventId) {
+    recordConversationEventFingerprint(state, eventId, type, now, {
+      interactionFingerprint: type ? interactionFingerprint : null,
+      settlement: type ? 'settled' : null,
+    });
+  }
   state.revision += 1;
   return {
     state,
