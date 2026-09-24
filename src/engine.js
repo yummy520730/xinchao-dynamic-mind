@@ -676,8 +676,23 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
     const belongsToThisSleep = latest && input.sleepStartedAt && Date.parse(latest.createdAt) >= Date.parse(input.sleepStartedAt);
     const createdAt = iso(now);
     const dreamId = belongsToThisSleep ? latest.id : null;
+    const nextAwarenessId = awarenessId(dreamId, createdAt);
+    const previousPending = state.pendingAwareness;
+    if (previousPending?.id && previousPending.id !== nextAwarenessId) {
+      state.awarenessHistory ??= [];
+      state.awarenessHistory.push({
+        id: previousPending.id,
+        dreamId: previousPending.dreamId ?? null,
+        createdAt: previousPending.createdAt ?? null,
+        status: 'superseded',
+        supersededAt: createdAt,
+        supersededBy: nextAwarenessId,
+        via: 'superseded_by_new_awareness',
+      });
+      state.awarenessHistory = state.awarenessHistory.slice(-30);
+    }
     state.pendingAwareness = {
-      id: awarenessId(dreamId, createdAt),
+      id: nextAwarenessId,
       createdAt,
       dreamId,
       residue: belongsToThisSleep ? latest.residue : null,
