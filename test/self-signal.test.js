@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { applyConversationEvent, applyDriveFeedback, newState } from '../src/engine.js';
 import {
+  acknowledgePendingAwareness,
   consumePendingAwareness,
   ensureSelfSignalState,
   evaluateSelfSignal,
@@ -119,6 +120,38 @@ test('pending awareness has stable self-signal id and moves into consumed histor
   assert.equal(consumed.state.pendingAwareness, null);
   assert.equal(consumed.state.awarenessHistory.at(-1).id, pending.id);
   assert.equal(consumed.state.awarenessHistory.at(-1).via, 'mind_presence');
+  assert.equal(consumed.state.awarenessHistory.at(-1).status, 'consumed');
+});
+
+test('explicit awareness ack is idempotent and does not clear a different pending item', () => {
+  const now = new Date('2026-09-24T02:10:00Z');
+  const state = newState(now);
+  state.pendingAwareness = {
+    id: 'awareness-live-1',
+    dreamId: 'dream-6514b7d7',
+    createdAt: '2026-09-23T22:24:00.000Z',
+    residue: '不应在 ack 参数里被改写',
+  };
+  const missed = acknowledgePendingAwareness(state, 'awareness-other', now, 'mind_presence');
+  assert.equal(missed.acknowledged, false);
+  assert.equal(missed.state.pendingAwareness.id, 'awareness-live-1');
+  assert.equal(missed.state.awarenessHistory.length, 0);
+
+  const first = acknowledgePendingAwareness(state, 'awareness-live-1', now, 'mind_presence');
+  assert.equal(first.acknowledged, true);
+  assert.equal(first.duplicate, false);
+  assert.equal(first.state.pendingAwareness, null);
+  assert.equal(first.state.awarenessHistory.length, 1);
+  assert.equal(first.state.awarenessHistory[0].status, 'consumed');
+  assert.equal(first.state.awarenessHistory[0].via, 'mind_presence');
+  assert.equal(first.state.awarenessHistory[0].residue, undefined);
+
+  const second = acknowledgePendingAwareness(first.state, 'awareness-live-1', new Date('2026-09-24T02:11:00Z'), 'mind_presence');
+  assert.equal(second.acknowledged, true);
+  assert.equal(second.duplicate, true);
+  assert.equal(second.state.pendingAwareness, null);
+  assert.equal(second.state.awarenessHistory.length, 1);
+  assert.equal(second.state.revision, first.state.revision);
 });
 
 test('ordinary drive feedback below threshold does not signal', () => {
