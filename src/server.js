@@ -650,7 +650,13 @@ async function publishReadyBridgeDeliveries() {
   const ready = await bridgeQueue.ready();
   for (const delivery of ready) {
     for (const [response, reasonFilter] of bridgeStreams.entries()) {
-      if (reasonFilter && delivery.reason !== reasonFilter) continue;
+      // Backward compatibility: the historical unfiltered stream is
+      // human-originated only. AI self-signals require explicit opt-in.
+      if (delivery.reason === SELF_SIGNAL_REASON) {
+        if (reasonFilter !== SELF_SIGNAL_REASON) continue;
+      } else if (reasonFilter && delivery.reason !== reasonFilter) {
+        continue;
+      }
       sendBridgeEvent(response, 'delivery', {
         protocol: BRIDGE_STREAM_PROTOCOL,
         deliveryId: delivery.id,
