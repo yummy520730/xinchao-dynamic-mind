@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { DIMENSIONS, DRIVE_KEYS, MEMORY_AFFINITY, SATURATE_CEIL } from './dimensions.js';
+import { awarenessId, ensureSelfSignalState } from './self-signal.js';
 import { newThoughtPool, obsessionBonus } from './thought-pool.js';
 
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
@@ -84,6 +85,7 @@ function ensureStateShape(state) {
     ? state.recentStateSignals.slice(-MAX_RECENT_STATE_SIGNALS)
     : [];
   state.stateSignalUsage ??= {};
+  ensureSelfSignalState(state);
   state.recentActions = Array.isArray(state.recentActions)
     ? state.recentActions.slice(-MAX_RECENT_ACTIONS)
     : [];
@@ -106,7 +108,7 @@ function ensureStateShape(state) {
   if (previousSchemaVersion < 9) {
     state.recentDreams = collapseDuplicateDreamHistory(state.recentDreams);
   }
-  state.schemaVersion = Math.max(14, previousSchemaVersion);
+  state.schemaVersion = Math.max(15, previousSchemaVersion);
   return state;
 }
 
@@ -427,7 +429,7 @@ function explicitSessionControl(event) {
 export function newState(now = new Date()) {
   const at = iso(now);
   return {
-    schemaVersion: 14,
+    schemaVersion: 15,
     revision: 0,
     consciousness: 'awake',
     lastConversationAt: at,
@@ -455,6 +457,12 @@ export function newState(now = new Date()) {
     nextDaytimeEmergenceAt: null,
     daytimeEmergenceUsage: {},
     pendingAwareness: null,
+    awarenessHistory: [],
+    selfSignalState: {
+      driveArmed: Object.fromEntries(DRIVE_KEYS.map((key) => [key, true])),
+      lastQueuedAt: {},
+      recent: [],
+    },
     sessionOverlays: {},
     contextDeliveries: {},
     recentConversationEvents: [],
@@ -660,9 +668,12 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
   if (wasSleeping) {
     const latest = state.recentDreams.at(-1);
     const belongsToThisSleep = latest && input.sleepStartedAt && Date.parse(latest.createdAt) >= Date.parse(input.sleepStartedAt);
+    const createdAt = iso(now);
+    const dreamId = belongsToThisSleep ? latest.id : null;
     state.pendingAwareness = {
-      createdAt: iso(now),
-      dreamId: belongsToThisSleep ? latest.id : null,
+      id: awarenessId(dreamId, createdAt),
+      createdAt,
+      dreamId,
       residue: belongsToThisSleep ? latest.residue : null,
       note: '外部记忆 MCP 只是记忆材料来源；调用记忆服务本身不代表醒来。',
     };
