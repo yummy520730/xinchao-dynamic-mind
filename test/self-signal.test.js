@@ -133,3 +133,21 @@ test('ordinary drive feedback below threshold does not signal', () => {
   );
   assert.equal(evaluated.signal, null);
 });
+
+
+test('legacy pending awareness without id is migrated deterministically', () => {
+  const now = new Date('2026-09-24T05:00:00Z');
+  const legacy = newState(now);
+  legacy.schemaVersion = 14;
+  legacy.pendingAwareness = {
+    createdAt: '2026-09-22T20:00:00.000Z',
+    dreamId: 'dream-legacy-0922',
+    residue: '旧梦余韵',
+  };
+  const migrated = applyDriveFeedback(legacy, {}, now);
+  assert.equal(migrated.schemaVersion, 15);
+  assert.match(migrated.pendingAwareness.id, /^awareness-/);
+
+  const again = applyDriveFeedback(migrated, {}, new Date('2026-09-24T05:01:00Z'));
+  assert.equal(again.pendingAwareness.id, migrated.pendingAwareness.id);
+});
