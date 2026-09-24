@@ -199,10 +199,39 @@ export function consumePendingAwareness(input, id, now = new Date(), via = 'runt
     dreamId: pending.dreamId ?? null,
     createdAt: pending.createdAt ?? null,
     consumedAt: iso(now),
+    status: 'consumed',
     via: String(via || 'runtime').slice(0, 40),
   });
   state.awarenessHistory = state.awarenessHistory.slice(-30);
   state.pendingAwareness = null;
   state.revision = Number(state.revision || 0) + 1;
   return { state, consumed: true };
+}
+
+export function acknowledgePendingAwareness(input, id, now = new Date(), via = 'mind_presence') {
+  const state = ensureSelfSignalState(structuredClone(input));
+  const wanted = String(id ?? '').trim();
+  if (!wanted) {
+    return { state, acknowledged: false, duplicate: false, consumed: false, reason: 'missing_id' };
+  }
+  const pendingId = String(state.pendingAwareness?.id ?? '');
+  if (pendingId && pendingId === wanted) {
+    const consumed = consumePendingAwareness(state, wanted, now, via);
+    return {
+      state: consumed.state,
+      acknowledged: true,
+      duplicate: false,
+      consumed: true,
+      reason: 'consumed',
+    };
+  }
+  const already = state.awarenessHistory.some((item) => {
+    if (String(item?.id ?? '') !== wanted) return false;
+    if (String(item?.status ?? '') === 'superseded') return false;
+    return String(item?.status ?? '') === 'consumed' || Boolean(item?.consumedAt);
+  });
+  if (already) {
+    return { state, acknowledged: true, duplicate: true, consumed: false, reason: 'already_consumed' };
+  }
+  return { state, acknowledged: false, duplicate: false, consumed: false, reason: 'not_pending' };
 }

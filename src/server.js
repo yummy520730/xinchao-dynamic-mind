@@ -26,7 +26,7 @@ import {
 import { BRIDGE_REASONS, BRIDGE_SERVER_PROTOCOL, BRIDGE_STREAM_PROTOCOL, SELF_SIGNAL_REASON, BridgeQueue } from './bridge-queue.js';
 import { createWakeBridgeEnvelope } from './wake-bridge-protocol.js';
 import {
-  consumePendingAwareness,
+  acknowledgePendingAwareness,
   evaluateSelfSignal,
   markSelfSignalQueued,
   pendingAwarenessSignal,
@@ -101,23 +101,27 @@ async function enqueueSelfSignal(signal, now = new Date()) {
   return queued;
 }
 
-async function consumeAwarenessForCurrentSession(awareness, now = new Date()) {
-  if (!awareness?.id) return false;
-  let consumed = false;
+async function acknowledgeAwareness(awarenessId, eventId, now = new Date()) {
+  let outcome = {
+    acknowledged: false,
+    duplicate: false,
+    consumed: false,
+    reason: 'not_pending',
+  };
   await updateState({
-    type: 'awareness_consumed',
-    source: 'mind_presence',
-    eventId: awareness.id,
+    type: 'awareness_ack',
+    source: 'mind_awareness_ack',
+    eventId: String(eventId || awarenessId).slice(0, 120),
     at: now,
   }, (current) => {
-    const result = consumePendingAwareness(current, awareness.id, now, 'mind_presence');
-    consumed = result.consumed;
+    const result = acknowledgePendingAwareness(current, awarenessId, now, 'mind_presence');
+    outcome = result;
     return result.state;
   });
-  if (consumed && config.bridge.enabled && config.bridge.selfSignalsEnabled) {
+  if (outcome.consumed && config.bridge.enabled && config.bridge.selfSignalsEnabled) {
     try {
       await bridgeQueue.acknowledgeEvent(
-        selfSignalEventId('awareness', awareness.id),
+        selfSignalEventId('awareness', awarenessId),
         'delivered',
         'current_session',
         now,
@@ -126,8 +130,15 @@ async function consumeAwarenessForCurrentSession(awareness, now = new Date()) {
       log('awareness_bridge_ack_failed', { message: error.message });
     }
   }
-  if (consumed) log('pending_awareness_consumed', { via: 'mind_presence', awareness: awareness.id });
-  return consumed;
+  if (outcome.consumed) {
+    log('pending_awareness_consumed', { via: 'mind_presence', awareness: awarenessId });
+  }
+  return {
+    acknowledged: Boolean(outcome.acknowledged),
+    duplicate: Boolean(outcome.duplicate),
+    awareness_id: String(awarenessId),
+    status: outcome.acknowledged ? 'consumed' : 'pending',
+  };
 }
 
 async function updateState(meta, mutate) {
@@ -1243,9 +1254,6 @@ const server = createServer(async (request, response) => {
                 created_at: result.pendingAwareness.createdAt ?? null,
               }
             : null;
-          if (awareness?.id) {
-            await consumeAwarenessForCurrentSession(result.pendingAwareness, new Date());
-          }
           return {
             revision: result.revision,
             consciousness: result.consciousness,
@@ -1256,6 +1264,7 @@ const server = createServer(async (request, response) => {
             duplicate: result.duplicate,
           };
         },
+        awarenessAck: async ({ awarenessId, eventId }) => acknowledgeAwareness(awarenessId, eventId, new Date()),
         stateSignal: async (event) => recordStateSignal(event, 'mcp'),
         handoffNote: async (note) => saveHandoffNote(note, 'mcp'),
         fromMe: async (entry) => recordFromMe(entry, 'mcp'),

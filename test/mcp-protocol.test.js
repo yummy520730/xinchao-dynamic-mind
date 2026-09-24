@@ -80,7 +80,7 @@ test('tools/list exposes context, presence, event and short handoff note tools',
   const tools = Object.fromEntries(result.body.result.tools.map((tool) => [tool.name, tool]));
   assert.deepEqual(
     result.body.result.tools.map((tool) => tool.name),
-    ['xinchao_context', 'mind_presence', 'xinchao_state_signal', 'xinchao_event', 'xinchao_handoff_note', 'xinchao_from_me'],
+    ['xinchao_context', 'mind_presence', 'mind_awareness_ack', 'xinchao_state_signal', 'xinchao_event', 'xinchao_handoff_note', 'xinchao_from_me'],
   );
   assert.equal(tools.xinchao_context.annotations.readOnlyHint, true);
   assert.deepEqual(tools.xinchao_context.inputSchema.required, undefined);
@@ -88,6 +88,9 @@ test('tools/list exposes context, presence, event and short handoff note tools',
   assert.equal(tools.mind_presence.annotations.idempotentHint, true);
   assert.deepEqual(tools.mind_presence.inputSchema.required, ['event_id']);
   assert.equal('interaction_type' in tools.mind_presence.inputSchema.properties, false);
+  assert.deepEqual(tools.mind_awareness_ack.inputSchema.required, ['awareness_id', 'event_id']);
+  assert.equal(tools.mind_awareness_ack.inputSchema.additionalProperties, false);
+  assert.equal(tools.mind_awareness_ack.annotations.idempotentHint, true);
   assert.equal(tools.xinchao_state_signal.annotations.destructiveHint, false);
   assert.equal(tools.xinchao_state_signal.annotations.idempotentHint, true);
   assert.deepEqual(tools.xinchao_state_signal.inputSchema.required, ['event_id', 'signal_type', 'origin']);
@@ -325,4 +328,32 @@ test('xinchao_event still requires interaction_type after mind_presence', async 
   }, handlers());
   assert.equal(result.body.result.isError, true);
   assert.match(result.body.result.content[0].text, /interaction_type/);
+});
+
+test('mind_awareness_ack rejects residue and does not invent a consume', async () => {
+  let called = 0;
+  const result = await handleMcpMessage({
+    jsonrpc: '2.0',
+    id: 9,
+    method: 'tools/call',
+    params: {
+      name: 'mind_awareness_ack',
+      arguments: {
+        awareness_id: 'awareness-1',
+        event_id: 'presence-1',
+        residue: '不要改余韵',
+        prompt: '用户原文',
+      },
+    },
+  }, {
+    ...handlers(),
+    awarenessAck: async () => {
+      called += 1;
+      return { acknowledged: true, duplicate: false, awareness_id: 'awareness-1' };
+    },
+  });
+  assert.equal(result.body.result.isError, true);
+  assert.match(result.body.result.content[0].text, /不接受正文或余韵/);
+  assert.equal(called, 0);
+  assert.equal(JSON.stringify(result).includes('用户原文'), false);
 });

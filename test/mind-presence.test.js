@@ -2,7 +2,7 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -579,5 +579,122 @@ test('public /mcp mind_presence returns projection after apply including session
   assert.equal(lateBody.result.structuredContent.revision, projection.revision);
   assert.deepEqual(lateBody.result.structuredContent.session, projection.session);
   assert.deepEqual(lateBody.result.structuredContent.top_drives, projection.top_drives);
+});
+
+test('mind_presence returns pending awareness without consuming it until explicit ack', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'xinchao-awareness-ack-'));
+  const port = await freePort();
+  const token = 'mcp-awareness-ack-token-0123456789abcd';
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const statePath = join(directory, 'state.json');
+  const seededAt = new Date();
+  const seeded = newState(seededAt);
+  seeded.consciousness = 'awake';
+  seeded.lastConversationAt = seededAt.toISOString();
+  seeded.lastSettledAt = seededAt.toISOString();
+  seeded.pendingAwareness = {
+    id: 'awareness-live-ack',
+    dreamId: 'dream-6514b7d7',
+    createdAt: '2026-09-23T22:24:00.000Z',
+    residue: '窗边那盏灯',
+  };
+  seeded.awarenessHistory = [];
+  await writeFile(statePath, `${JSON.stringify(seeded)}\n`);
+  const output = { value: '' };
+  const child = spawn(process.execPath, [serverPath], {
+    cwd: projectDir,
+    env: {
+      ...process.env,
+      PORT: String(port),
+      SERVICE_TOKEN: token,
+      STATE_PATH: statePath,
+      TRANSITION_JOURNAL_PATH: join(directory, 'transitions.jsonl'),
+      OAUTH_STATE_PATH: join(directory, 'oauth.json'),
+      SETTLE_INTERVAL_MINUTES: '1440',
+      SHADOW_MODE: 'true',
+      MODEL_ENABLED: 'false',
+      BARK_ENABLED: 'false',
+      DAYTIME_EMERGENCE_ENABLED: 'false',
+      CONTEXT_OMBRE_ENABLED: 'false',
+      MCP_ENABLED: 'true',
+      OAUTH_ENABLED: 'false',
+      DASHBOARD_ENABLED: 'false',
+      BRIDGE_ENABLED: 'false',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stdout.on('data', (chunk) => { output.value += chunk; });
+  child.stderr.on('data', (chunk) => { output.value += chunk; });
+  t.after(async () => {
+    if (child.exitCode == null) {
+      child.kill('SIGTERM');
+      await once(child, 'exit');
+    }
+    await rm(directory, { recursive: true, force: true });
+  });
+  await waitForHealth(baseUrl, child, output);
+
+  const callTool = (name, args) => fetch(`${baseUrl}/mcp`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${token}`,
+      'content-type': 'application/json',
+      accept: 'application/json, text/event-stream',
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name, arguments: args },
+    }),
+  });
+
+  const presence = await callTool('mind_presence', {
+    session_id: 'vps-window',
+    event_id: 'presence-ack-1',
+    prompt: '用户原文不能进服务端',
+  });
+  const presenceBody = await presence.json();
+  assert.equal(presenceBody.result.isError, false);
+  assert.equal(presenceBody.result.structuredContent.pending_awareness.id, 'awareness-live-ack');
+  let stored = JSON.parse(await readFile(statePath, 'utf8'));
+  assert.equal(stored.pendingAwareness.id, 'awareness-live-ack');
+  assert.equal(stored.awarenessHistory.some((item) => item.status === 'consumed'), false);
+
+  const rejected = await callTool('mind_awareness_ack', {
+    awareness_id: 'awareness-live-ack',
+    event_id: 'presence-ack-1',
+    residue: '改写余韵',
+  });
+  const rejectedBody = await rejected.json();
+  assert.equal(rejectedBody.result.isError, true);
+  stored = JSON.parse(await readFile(statePath, 'utf8'));
+  assert.equal(stored.pendingAwareness.id, 'awareness-live-ack');
+
+  const acked = await callTool('mind_awareness_ack', {
+    awareness_id: 'awareness-live-ack',
+    event_id: 'presence-ack-1',
+  });
+  const ackedBody = await acked.json();
+  assert.equal(ackedBody.result.isError, false);
+  assert.equal(ackedBody.result.structuredContent.acknowledged, true);
+  assert.equal(ackedBody.result.structuredContent.duplicate, false);
+  stored = JSON.parse(await readFile(statePath, 'utf8'));
+  assert.equal(stored.pendingAwareness, null);
+  assert.equal(stored.awarenessHistory.length, 1);
+  assert.equal(stored.awarenessHistory[0].status, 'consumed');
+  assert.equal(stored.awarenessHistory[0].via, 'mind_presence');
+  assert.equal(stored.awarenessHistory[0].id, 'awareness-live-ack');
+
+  const again = await callTool('mind_awareness_ack', {
+    awareness_id: 'awareness-live-ack',
+    event_id: 'presence-ack-1',
+  });
+  const againBody = await again.json();
+  assert.equal(againBody.result.structuredContent.acknowledged, true);
+  assert.equal(againBody.result.structuredContent.duplicate, true);
+  stored = JSON.parse(await readFile(statePath, 'utf8'));
+  assert.equal(stored.awarenessHistory.length, 1);
+  assert.equal(JSON.stringify(stored).includes('用户原文'), false);
 });
 });

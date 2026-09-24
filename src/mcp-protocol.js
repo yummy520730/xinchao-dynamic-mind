@@ -100,6 +100,40 @@ export const XINCHAO_TOOLS = [
     },
   },
   {
+    name: 'mind_awareness_ack',
+    title: '确认觉察已送达',
+    description: [
+      '仅在调用方已经成功解析并注入 mind_presence 返回的 pending_awareness 之后调用。',
+      '相同 awareness_id 重复确认是幂等的。未确认前服务端不会清除 pendingAwareness。',
+      '不接受 thought、residue、note 或任何聊天正文。',
+    ].join(''),
+    inputSchema: {
+      type: 'object',
+      properties: {
+        awareness_id: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 80,
+          description: 'mind_presence 投影里的 pending_awareness.id。',
+        },
+        event_id: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 120,
+          description: '本次 presence 的稳定 event_id，用于关联，不是聊天内容。',
+        },
+      },
+      required: ['awareness_id', 'event_id'],
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
     name: 'xinchao_state_signal',
     title: '提交受限状态信号',
     description: [
@@ -333,6 +367,21 @@ function contextArgs(args = {}, fallbackSessionId = '') {
   };
 }
 
+function awarenessAckArgs(args = {}) {
+  const forbidden = ['residue', 'thought', 'note', 'message', 'content', 'prompt', 'text'];
+  for (const key of forbidden) {
+    if (args[key] !== undefined) throw new Error('mind_awareness_ack 不接受正文或余韵修改');
+  }
+  const allowed = new Set(['awareness_id', 'event_id']);
+  const unexpected = Object.keys(args).filter((key) => !allowed.has(key));
+  if (unexpected.length) throw new Error('mind_awareness_ack 只接受 awareness_id 与 event_id');
+  const awarenessId = String(args.awareness_id ?? '').trim().slice(0, 80);
+  if (!awarenessId) throw new Error('awareness_id 是必填项');
+  const eventId = String(args.event_id ?? '').trim().slice(0, 120);
+  if (!eventId) throw new Error('event_id 是必填项');
+  return { awarenessId, eventId };
+}
+
 function presenceArgs(args = {}, fallbackSessionId = '') {
   const sessionId = stableSessionId(args, fallbackSessionId);
   if (!sessionId) throw new Error('session_id 是必填项');
@@ -437,6 +486,14 @@ async function callTool(name, args, handlers) {
     const result = await handlers.presence(presenceArgs(args, fallbackSessionId));
     return toolText(JSON.stringify(result), result);
   }
+  if (name === 'mind_awareness_ack') {
+    const result = await handlers.awarenessAck(awarenessAckArgs(args));
+    const duplicate = result.duplicate ? ' duplicate=true' : '';
+    return toolText(
+      `心潮觉察确认：awareness=${result.awareness_id} acknowledged=${Boolean(result.acknowledged)}${duplicate}`,
+      result,
+    );
+  }
   if (name === 'xinchao_state_signal') {
     const result = await handlers.stateSignal(stateSignalArgs(args));
     const duplicate = result.duplicate ? ' duplicate=true' : '';
@@ -495,6 +552,7 @@ export async function handleMcpMessage(payload, handlers) {
         },
         instructions: [
           '真实用户回合开始时调用 mind_presence 上报在场；event_id 必须唯一，重试时复用。不要提交用户文本或 interaction_type。',
+          'mind_presence 只返回 pending_awareness，不消费。成功注入上下文后再调用 mind_awareness_ack；未送达不要确认。',
           '新窗口开始或需要完整交接时调用 xinchao_context；服务端会绑定当前 MCP 连接，无需自行编写 session_id。',
           'xinchao_state_signal 只接收外部 deterministic state machine 已确认的用户点火信号；不要由模型自造。',
           '一次实际完成的互动后可调用 xinchao_event 更新窗口短状态；与 mind_presence 使用不同 event_id。',
