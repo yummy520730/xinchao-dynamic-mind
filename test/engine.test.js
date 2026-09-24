@@ -173,13 +173,13 @@ test('session weather decays linearly toward neutral across the existing TTL', (
 
   const halfway = activeSessionOverlay(first, 'claude-window', new Date('2026-09-23T02:00:00Z'));
   assert.equal(halfway.tone, 'focused');
-  assert.equal(halfway.attention, 0.52);
-  assert.equal(halfway.confidence, 0.54);
+  assert.equal(halfway.attention, 0.5213);
+  assert.equal(halfway.confidence, 0.5427);
 
-  const late = activeSessionOverlay(first, 'claude-window', new Date('2026-09-23T03:00:00Z'));
+  const late = activeSessionOverlay(first, 'claude-window', new Date('2026-09-23T03:30:00Z'));
   assert.equal(late.tone, 'neutral');
-  assert.equal(late.attention, 0.51);
-  assert.equal(late.confidence, 0.52);
+  assert.equal(late.attention, 0.5053);
+  assert.equal(late.confidence, 0.5107);
 
   assert.equal(
     activeSessionOverlay(first, 'claude-window', new Date('2026-09-23T04:00:00Z')),
@@ -204,8 +204,8 @@ test('a later interaction applies its delta on top of the decayed session weathe
   }, secondAt).state;
   const overlay = activeSessionOverlay(second, 'claude-window', secondAt);
 
-  assert.equal(overlay.attention, 0.56);
-  assert.equal(overlay.confidence, 0.62);
+  assert.equal(overlay.attention, 0.5613);
+  assert.equal(overlay.confidence, 0.6227);
   assert.equal(overlay.tone, 'focused');
 });
 
