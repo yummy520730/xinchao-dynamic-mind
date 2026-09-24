@@ -328,10 +328,47 @@ function applyInteractionOutcome(state, type, now, options = {}) {
   };
 }
 
+const SESSION_NEUTRAL = Object.freeze({
+  warmth: 0.5,
+  tension: 0,
+  attention: 0.5,
+  confidence: 0.5,
+});
+const SESSION_DECAY_GRACE_MS = 15 * 60_000;
+
+function decayedSessionOverlay(overlay, now = new Date()) {
+  if (!overlay) return null;
+  const expiresAt = Date.parse(overlay.expiresAt ?? '');
+  const startAt = Date.parse(
+    overlay.lastConversationAt
+      ?? overlay.updatedAt
+      ?? overlay.createdAt
+      ?? '',
+  );
+  const nowMs = now.getTime();
+  if (Number.isFinite(expiresAt) && expiresAt <= nowMs) return null;
+  if (!Number.isFinite(startAt) || !Number.isFinite(expiresAt) || expiresAt <= startAt) {
+    return structuredClone(overlay);
+  }
+  const decayStart = Math.min(expiresAt, startAt + SESSION_DECAY_GRACE_MS);
+  if (nowMs <= decayStart) return structuredClone(overlay);
+  const progress = clamp((nowMs - decayStart) / Math.max(1, expiresAt - decayStart), 0, 1);
+  const projected = structuredClone(overlay);
+  for (const key of SESSION_FIELDS) {
+    const neutral = SESSION_NEUTRAL[key];
+    const current = Number(overlay[key] ?? neutral);
+    projected[key] = Number((neutral + (current - neutral) * (1 - progress)).toFixed(4));
+  }
+  if (progress >= 0.75) projected.tone = 'neutral';
+  return projected;
+}
+
+
 function applySessionOverlay(state, event, now) {
   const sessionId = cleanSessionId(event);
   if (!sessionId) return { sessionId: '', created: false };
-  const current = state.sessionOverlays[sessionId] ?? {
+  const existing = state.sessionOverlays[sessionId];
+  const current = decayedSessionOverlay(existing, now) ?? {
     sessionId,
     createdAt: iso(now),
     tone: 'neutral',
@@ -956,11 +993,7 @@ export function activeSessionOverlay(input, sessionId, now = new Date()) {
   const state = ensureStateShape(structuredClone(input));
   const key = String(sessionId ?? '').trim();
   if (!key) return null;
-  const overlay = state.sessionOverlays[key];
-  if (!overlay) return null;
-  const expiresAt = Date.parse(overlay.expiresAt ?? '');
-  if (Number.isFinite(expiresAt) && expiresAt <= now.getTime()) return null;
-  return structuredClone(overlay);
+  return decayedSessionOverlay(state.sessionOverlays[key], now);
 }
 
 // Public short-state fields already used by the context envelope session overlay.
