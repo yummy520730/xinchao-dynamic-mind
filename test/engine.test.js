@@ -157,6 +157,58 @@ test('session overlays stay isolated while global drives remain shared', () => {
   assert.equal(state.drives.curiosity, 0.15);
 });
 
+test('session weather decays linearly toward neutral across the existing TTL', () => {
+  const start = new Date('2026-09-23T00:00:00Z');
+  const first = applyConversationEvent(newState(start), {
+    sessionId: 'claude-window',
+    eventId: 'session-decay-1',
+    interactionType: 'task_progress',
+  }, start).state;
+  const drivesBefore = structuredClone(first.drives);
+
+  const immediate = activeSessionOverlay(first, 'claude-window', start);
+  assert.equal(immediate.tone, 'focused');
+  assert.equal(immediate.attention, 0.54);
+  assert.equal(immediate.confidence, 0.58);
+
+  const halfway = activeSessionOverlay(first, 'claude-window', new Date('2026-09-23T02:00:00Z'));
+  assert.equal(halfway.tone, 'focused');
+  assert.equal(halfway.attention, 0.52);
+  assert.equal(halfway.confidence, 0.54);
+
+  const late = activeSessionOverlay(first, 'claude-window', new Date('2026-09-23T03:00:00Z'));
+  assert.equal(late.tone, 'neutral');
+  assert.equal(late.attention, 0.51);
+  assert.equal(late.confidence, 0.52);
+
+  assert.equal(
+    activeSessionOverlay(first, 'claude-window', new Date('2026-09-23T04:00:00Z')),
+    null,
+  );
+  assert.deepEqual(first.drives, drivesBefore);
+});
+
+test('a later interaction applies its delta on top of the decayed session weather', () => {
+  const start = new Date('2026-09-23T00:00:00Z');
+  const first = applyConversationEvent(newState(start), {
+    sessionId: 'claude-window',
+    eventId: 'session-decay-2a',
+    interactionType: 'task_progress',
+  }, start).state;
+
+  const secondAt = new Date('2026-09-23T02:00:00Z');
+  const second = applyConversationEvent(first, {
+    sessionId: 'claude-window',
+    eventId: 'session-decay-2b',
+    interactionType: 'task_progress',
+  }, secondAt).state;
+  const overlay = activeSessionOverlay(second, 'claude-window', secondAt);
+
+  assert.equal(overlay.attention, 0.56);
+  assert.equal(overlay.confidence, 0.62);
+  assert.equal(overlay.tone, 'focused');
+});
+
 test('conversation outcomes observe elapsed time without growth, then apply bounded drive relief', () => {
   const start = new Date('2026-07-28T00:00:00Z');
   const now = new Date('2026-07-28T01:00:00Z');
