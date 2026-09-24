@@ -1067,6 +1067,12 @@ const server = createServer(async (request, response) => {
         ntfyEnabled: config.ntfy.enabled,
         notifications: { enabled: notificationEnabled, provider: notificationProvider },
         bridgeEnabled: config.bridge.enabled,
+        selfSignal: {
+          enabled: config.selfSignal.enabled && config.bridge.enabled && config.bridge.selfSignalsEnabled,
+          thresholdRatio: config.selfSignal.thresholdRatio,
+          rearmRatio: config.selfSignal.rearmRatio,
+          minDelta: config.selfSignal.minDelta,
+        },
       });
     }
     if (await oauth.handle(request, response, url)) return;
@@ -1074,7 +1080,11 @@ const server = createServer(async (request, response) => {
       if (!config.bridge.enabled) return send(response, 404, { error: 'not found' });
       if (!bridgeAuthorized(request)) return send(response, 401, { error: 'unauthorized' });
       if (request.method === 'GET' && url.pathname === '/bridge/v1/health') {
-        return send(response, 200, { protocol: BRIDGE_SERVER_PROTOCOL, status: 'ok' });
+        return send(response, 200, {
+          protocol: BRIDGE_SERVER_PROTOCOL,
+          status: 'ok',
+          selfSignalEnabled: config.bridge.selfSignalsEnabled && config.selfSignal.enabled,
+        });
       }
       if (request.method === 'GET' && url.pathname === '/bridge/v1/events') {
         const reasonFilter = String(url.searchParams.get('reason') ?? '').trim();
