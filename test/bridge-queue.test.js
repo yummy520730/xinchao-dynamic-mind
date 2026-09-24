@@ -40,7 +40,7 @@ test('Bridge queue rejects autonomous AI content', async (t) => {
     eventId: 'autonomous-dream-1',
     reason: 'dream_residue',
     message: '梦境不允许自动注入。',
-  }), /user interactions only/);
+  }), /bridge reason is not supported/);
 });
 
 
