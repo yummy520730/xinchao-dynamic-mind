@@ -151,3 +151,35 @@ test('legacy pending awareness without id is migrated deterministically', () => 
   const again = applyDriveFeedback(migrated, {}, new Date('2026-09-24T05:01:00Z'));
   assert.equal(again.pendingAwareness.id, migrated.pendingAwareness.id);
 });
+
+
+test('new wake archives an older unconsumed awareness instead of silently overwriting it', () => {
+  const firstWakeAt = new Date('2026-09-22T20:00:00Z');
+  const state = newState(firstWakeAt);
+  state.pendingAwareness = {
+    id: 'awareness-old-0922',
+    createdAt: '2026-09-22T20:00:00.000Z',
+    dreamId: 'dream-old-0922',
+    residue: '旧余韵',
+  };
+  state.consciousness = 'sleeping';
+  state.sleepStartedAt = '2026-09-24T00:00:00.000Z';
+  state.recentDreams.push({
+    id: 'dream-new-0924',
+    createdAt: '2026-09-24T01:00:00.000Z',
+    residue: '新余韵',
+  });
+
+  const result = applyConversationEvent(
+    state,
+    { sessionId: 'cc-B', eventId: 'presence-new-wake' },
+    new Date('2026-09-24T02:00:00Z'),
+  );
+
+  assert.equal(result.state.pendingAwareness.dreamId, 'dream-new-0924');
+  const archived = result.state.awarenessHistory.at(-1);
+  assert.equal(archived.id, 'awareness-old-0922');
+  assert.equal(archived.status, 'superseded');
+  assert.equal(archived.via, 'superseded_by_new_awareness');
+  assert.equal(archived.supersededBy, result.state.pendingAwareness.id);
+});
