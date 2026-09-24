@@ -286,7 +286,11 @@ test('POST /v1/handoff-note stores a bounded idempotent note for HTTP clients', 
   assert.equal(bridgeUnauthorized.status, 401);
   const bridgeHeaders = { authorization: `Bearer ${bridgeToken}` };
   const bridgeHealth = await fetch(`${baseUrl}/bridge/v1/health`, { headers: bridgeHeaders });
-  assert.deepEqual(await bridgeHealth.json(), { protocol: 'xinchao-bridge-server/1', status: 'ok' });
+  assert.deepEqual(await bridgeHealth.json(), {
+    protocol: 'xinchao-bridge-server/1',
+    status: 'ok',
+    selfSignalEnabled: true,
+  });
   const bridgeDelivery = await fetch(`${baseUrl}/bridge/v1/deliveries/${interactionResult.bridge.deliveryId}`, { headers: bridgeHeaders });
   assert.equal(bridgeDelivery.status, 200);
   const runtimeEnvelope = await bridgeDelivery.json();

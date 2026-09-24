@@ -491,7 +491,7 @@ export async function handleMcpMessage(payload, handlers) {
         serverInfo: {
           name: 'xinchao-dynamic-mind',
           title: '心潮动态心智系统',
-          version: '2.5.15-lmc.1',
+          version: '2.6.0-lmc.1',
         },
         instructions: [
           '真实用户回合开始时调用 mind_presence 上报在场；event_id 必须唯一，重试时复用。不要提交用户文本或 interaction_type。',

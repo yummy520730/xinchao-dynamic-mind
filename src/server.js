@@ -23,7 +23,15 @@ import {
   historicalSourceUnavailable,
   mapDreamSourceResponse,
 } from './dashboard-dream-source.js';
-import { BRIDGE_SERVER_PROTOCOL, BRIDGE_STREAM_PROTOCOL, BridgeQueue } from './bridge-queue.js';
+import { BRIDGE_REASONS, BRIDGE_SERVER_PROTOCOL, BRIDGE_STREAM_PROTOCOL, SELF_SIGNAL_REASON, BridgeQueue } from './bridge-queue.js';
+import { createWakeBridgeEnvelope } from './wake-bridge-protocol.js';
+import {
+  consumePendingAwareness,
+  evaluateSelfSignal,
+  markSelfSignalQueued,
+  pendingAwarenessSignal,
+  selfSignalEventId,
+} from './self-signal.js';
 import { FromMeStore } from './from-me-store.js';
 import { XinchaoSyncEvents } from './sync-events.js';
 
@@ -53,20 +61,91 @@ const dashboardAuth = new DashboardAuth({
 });
 const bridgeQueue = new BridgeQueue(config.bridge.statePath, config.bridge);
 const fromMeStore = new FromMeStore(config.fromMe.statePath, config.fromMe);
-const bridgeStreams = new Set();
+const bridgeStreams = new Map();
 await oauth.init();
 let cyclePromise = null;
-const SYSTEM_VERSION = '2.5.15-lmc.1';
+const SYSTEM_VERSION = '2.6.0-lmc.1';
 
 function log(event, fields = {}) {
   console.log(JSON.stringify({ at: new Date().toISOString(), event, ...fields }));
 }
 
+async function enqueueSelfSignal(signal, now = new Date()) {
+  if (!signal || !config.bridge.enabled || !config.bridge.selfSignalsEnabled) return null;
+  const wake = createWakeBridgeEnvelope({
+    kind: signal.kind,
+    audience: 'ai',
+    aiContext: signal.aiContext ?? {},
+    source: 'xinchao-self-signal',
+    dedupeKey: signal.eventId,
+    ttlHours: config.bridge.ttlHours,
+    now,
+  });
+  const queued = await bridgeQueue.enqueue({
+    eventId: signal.eventId,
+    reason: SELF_SIGNAL_REASON,
+    message: signal.message,
+    deliveryId: signal.deliveryId,
+    coalesceKey: signal.coalesceKey,
+    wake,
+  }, now);
+  await store.update((latest) => markSelfSignalQueued(latest, signal, now));
+  await publishReadyBridgeDeliveries();
+  log('self_signal_queued', {
+    kind: signal.kind,
+    drive: signal.driveKey ?? null,
+    deliveryId: queued.delivery.id,
+    duplicate: queued.duplicate,
+    coalesced: queued.coalesced,
+  });
+  return queued;
+}
+
+async function consumeAwarenessForCurrentSession(awareness, now = new Date()) {
+  if (!awareness?.id) return false;
+  let consumed = false;
+  await updateState({
+    type: 'awareness_consumed',
+    source: 'mind_presence',
+    eventId: awareness.id,
+    at: now,
+  }, (current) => {
+    const result = consumePendingAwareness(current, awareness.id, now, 'mind_presence');
+    consumed = result.consumed;
+    return result.state;
+  });
+  if (consumed && config.bridge.enabled && config.bridge.selfSignalsEnabled) {
+    try {
+      await bridgeQueue.acknowledgeEvent(
+        selfSignalEventId('awareness', awareness.id),
+        'delivered',
+        'current_session',
+        now,
+      );
+    } catch (error) {
+      log('awareness_bridge_ack_failed', { message: error.message });
+    }
+  }
+  if (consumed) log('pending_awareness_consumed', { via: 'mind_presence', awareness: awareness.id });
+  return consumed;
+}
+
 async function updateState(meta, mutate) {
   let before;
+  let selfSignal = null;
+  const transitionAt = meta.at ? new Date(meta.at) : new Date();
   const after = await store.update((current) => {
     before = structuredClone(current);
-    return mutate(current);
+    const mutated = mutate(current);
+    const evaluated = evaluateSelfSignal(
+      before,
+      mutated,
+      meta,
+      transitionAt,
+      config.selfSignal,
+    );
+    selfSignal = evaluated.signal;
+    return evaluated.state;
   });
   try {
     await journal.recordTransition({
@@ -82,6 +161,17 @@ async function updateState(meta, mutate) {
     });
   } catch (error) {
     log('transition_journal_failed', { type: meta.type, message: error.message });
+  }
+  if (selfSignal) {
+    try {
+      await enqueueSelfSignal(selfSignal, transitionAt);
+    } catch (error) {
+      log('self_signal_queue_failed', {
+        kind: selfSignal.kind,
+        drive: selfSignal.driveKey ?? null,
+        message: error.message,
+      });
+    }
   }
   return after;
 }
@@ -559,7 +649,14 @@ async function publishReadyBridgeDeliveries() {
   if (!config.bridge.enabled || !bridgeStreams.size) return;
   const ready = await bridgeQueue.ready();
   for (const delivery of ready) {
-    for (const response of bridgeStreams) {
+    for (const [response, reasonFilter] of bridgeStreams.entries()) {
+      // Backward compatibility: the historical unfiltered stream is
+      // human-originated only. AI self-signals require explicit opt-in.
+      if (delivery.reason === SELF_SIGNAL_REASON) {
+        if (reasonFilter !== SELF_SIGNAL_REASON) continue;
+      } else if (reasonFilter && delivery.reason !== reasonFilter) {
+        continue;
+      }
       sendBridgeEvent(response, 'delivery', {
         protocol: BRIDGE_STREAM_PROTOCOL,
         deliveryId: delivery.id,
@@ -976,6 +1073,12 @@ const server = createServer(async (request, response) => {
         ntfyEnabled: config.ntfy.enabled,
         notifications: { enabled: notificationEnabled, provider: notificationProvider },
         bridgeEnabled: config.bridge.enabled,
+        selfSignal: {
+          enabled: config.selfSignal.enabled && config.bridge.enabled && config.bridge.selfSignalsEnabled,
+          thresholdRatio: config.selfSignal.thresholdRatio,
+          rearmRatio: config.selfSignal.rearmRatio,
+          minDelta: config.selfSignal.minDelta,
+        },
       });
     }
     if (await oauth.handle(request, response, url)) return;
@@ -983,9 +1086,17 @@ const server = createServer(async (request, response) => {
       if (!config.bridge.enabled) return send(response, 404, { error: 'not found' });
       if (!bridgeAuthorized(request)) return send(response, 401, { error: 'unauthorized' });
       if (request.method === 'GET' && url.pathname === '/bridge/v1/health') {
-        return send(response, 200, { protocol: BRIDGE_SERVER_PROTOCOL, status: 'ok' });
+        return send(response, 200, {
+          protocol: BRIDGE_SERVER_PROTOCOL,
+          status: 'ok',
+          selfSignalEnabled: config.bridge.selfSignalsEnabled && config.selfSignal.enabled,
+        });
       }
       if (request.method === 'GET' && url.pathname === '/bridge/v1/events') {
+        const reasonFilter = String(url.searchParams.get('reason') ?? '').trim();
+        if (reasonFilter && !BRIDGE_REASONS.includes(reasonFilter)) {
+          return send(response, 400, { error: 'unsupported bridge reason filter' });
+        }
         response.writeHead(200, {
           'Content-Type': 'text/event-stream; charset=utf-8',
           'Cache-Control': 'no-store, no-transform',
@@ -993,7 +1104,7 @@ const server = createServer(async (request, response) => {
           'X-Accel-Buffering': 'no',
         });
         sendBridgeEvent(response, 'connected', { protocol: BRIDGE_STREAM_PROTOCOL });
-        bridgeStreams.add(response);
+        bridgeStreams.set(response, reasonFilter || null);
         const heartbeat = setInterval(() => response.write(': heartbeat\n\n'), 20_000);
         heartbeat.unref();
         request.on('close', () => {
@@ -1015,6 +1126,8 @@ const server = createServer(async (request, response) => {
           decodeURIComponent(acknowledgementMatch[1]),
           payload.status,
           payload.code,
+          new Date(),
+          payload.retry_after_seconds ?? payload.retryAfterSeconds ?? 0,
         );
         return item ? send(response, 200, { ok: true, deliveryId: item.id, status: item.status }) : send(response, 404, { error: 'delivery not found' });
       }
@@ -1122,12 +1235,24 @@ const server = createServer(async (request, response) => {
         },
         presence: async (event) => {
           const result = await recordConversationEvent(event, 'mcp');
+          const awareness = result.pendingAwareness
+            ? {
+                id: result.pendingAwareness.id,
+                dream_id: result.pendingAwareness.dreamId ?? null,
+                residue: String(result.pendingAwareness.residue ?? '').slice(0, 280) || null,
+                created_at: result.pendingAwareness.createdAt ?? null,
+              }
+            : null;
+          if (awareness?.id) {
+            await consumeAwarenessForCurrentSession(result.pendingAwareness, new Date());
+          }
           return {
             revision: result.revision,
             consciousness: result.consciousness,
             fatigue: result.fatigue,
             top_drives: result.top_drives,
             session: result.session ?? null,
+            pending_awareness: awareness,
             duplicate: result.duplicate,
           };
         },
@@ -1262,7 +1387,18 @@ const server = createServer(async (request, response) => {
 
 server.listen(config.port, '0.0.0.0', async () => {
   await store.update((state) => settleState(state, new Date(), config.sleepAfterMinutes, config.settle).state);
-  if (config.bridge.enabled) await bridgeQueue.init();
+  if (config.bridge.enabled) {
+    await bridgeQueue.init();
+    if (config.bridge.selfSignalsEnabled) {
+      const startupState = await store.read();
+      const legacyAwarenessSignal = pendingAwarenessSignal(startupState.pendingAwareness, new Date());
+      if (legacyAwarenessSignal) {
+        await enqueueSelfSignal(legacyAwarenessSignal, new Date()).catch((error) => {
+          log('startup_pending_awareness_queue_failed', { message: error.message });
+        });
+      }
+    }
+  }
   await fromMeStore.list();
   await syncEvents.replayPending().catch((error) => log('xinchao_sync_replay_failed', {
     error_name: error?.name || 'Error',

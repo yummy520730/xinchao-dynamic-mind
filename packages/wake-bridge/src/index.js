@@ -5,6 +5,8 @@ export const WAKE_BRIDGE_KINDS = Object.freeze([
   'longing_content',
   'action_result',
   'pending_from_me',
+  'drive_transition',
+  'pending_awareness',
 ]);
 
 export const WAKE_BRIDGE_AUDIENCES = Object.freeze(['user', 'ai', 'both']);
