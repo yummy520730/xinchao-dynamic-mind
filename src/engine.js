@@ -104,6 +104,12 @@ function ensureStateShape(state) {
     ? Math.max(0, Math.floor(Number(state.consecutiveNightDreamMiss)))
     : 0;
   delete state.pendingDreamResidue;
+  if (state.pendingAwareness && !state.pendingAwareness.id) {
+    state.pendingAwareness.id = awarenessId(
+      state.pendingAwareness.dreamId ?? null,
+      state.pendingAwareness.createdAt ?? state.lastConversationAt ?? '',
+    );
+  }
   state.recentDreams = Array.isArray(state.recentDreams) ? state.recentDreams : [];
   if (previousSchemaVersion < 9) {
     state.recentDreams = collapseDuplicateDreamHistory(state.recentDreams);
