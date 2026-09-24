@@ -90,6 +90,27 @@ function driveCandidate(before, after, meta, options) {
   return best;
 }
 
+export function pendingAwarenessSignal(pending, now = new Date()) {
+  if (!pending?.id) return null;
+  const eventId = selfSignalEventId('awareness', pending.id);
+  return {
+    eventId,
+    deliveryId: selfSignalDeliveryId(eventId),
+    coalesceKey: `awareness:${pending.id}`,
+    kind: 'pending_awareness',
+    driveKey: null,
+    message: '心潮有一条刚醒来的内部觉察需要被当前会话或下一次自主心跳看见。',
+    aiContext: {
+      awareness_id: pending.id,
+      dream_id: pending.dreamId ?? null,
+      residue: String(pending.residue ?? '').slice(0, 280) || null,
+      created_at: pending.createdAt ?? iso(now),
+      evidence_type: 'wake_awareness',
+    },
+  };
+}
+
+
 export function evaluateSelfSignal(beforeInput, afterInput, meta = {}, now = new Date(), options = {}) {
   const after = ensureSelfSignalState(afterInput);
   const before = ensureSelfSignalState(structuredClone(beforeInput ?? {}));
@@ -98,25 +119,7 @@ export function evaluateSelfSignal(beforeInput, afterInput, meta = {}, now = new
   const pending = after.pendingAwareness;
   const previousPendingId = String(before.pendingAwareness?.id ?? '');
   if (pending?.id && String(pending.id) !== previousPendingId) {
-    const eventId = selfSignalEventId('awareness', pending.id);
-    return {
-      state: after,
-      signal: {
-        eventId,
-        deliveryId: selfSignalDeliveryId(eventId),
-        coalesceKey: `awareness:${pending.id}`,
-        kind: 'pending_awareness',
-        driveKey: null,
-        message: '心潮有一条刚醒来的内部觉察需要被当前会话或下一次自主心跳看见。',
-        aiContext: {
-          awareness_id: pending.id,
-          dream_id: pending.dreamId ?? null,
-          residue: String(pending.residue ?? '').slice(0, 280) || null,
-          created_at: pending.createdAt ?? iso(now),
-          evidence_type: 'wake_awareness',
-        },
-      },
-    };
+    return { state: after, signal: pendingAwarenessSignal(pending, now) };
   }
 
   if (String(meta?.type ?? '') === 'night_dream_recorded') {
