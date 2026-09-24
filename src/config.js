@@ -112,6 +112,13 @@ export function loadConfig() {
       maxEntries: number('BRIDGE_MAX_ENTRIES', 500, 10, 5000),
       ttlHours: number('BRIDGE_TTL_HOURS', 168, 1, 720),
       pollSeconds: number('BRIDGE_POLL_SECONDS', 15, 2, 300),
+      selfSignalsEnabled: bool('BRIDGE_SELF_SIGNALS', true),
+    },
+    selfSignal: {
+      enabled: bool('SELF_SIGNAL_ENABLED', true),
+      thresholdRatio: number('SELF_SIGNAL_DRIVE_THRESHOLD_RATIO', 0.72, 0.4, 0.95),
+      rearmRatio: number('SELF_SIGNAL_DRIVE_REARM_RATIO', 0.52, 0.2, 0.85),
+      minDelta: number('SELF_SIGNAL_MIN_DRIVE_DELTA', 0.025, 0.005, 0.2),
     },
     fromMe: {
       statePath: process.env.AI_OUTBOX_PATH ?? statePath.replace(/[^/]+$/, 'from-me.json'),
