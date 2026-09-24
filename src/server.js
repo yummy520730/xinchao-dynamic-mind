@@ -29,6 +29,7 @@ import {
   consumePendingAwareness,
   evaluateSelfSignal,
   markSelfSignalQueued,
+  pendingAwarenessSignal,
   selfSignalEventId,
 } from './self-signal.js';
 import { FromMeStore } from './from-me-store.js';
@@ -1370,7 +1371,18 @@ const server = createServer(async (request, response) => {
 
 server.listen(config.port, '0.0.0.0', async () => {
   await store.update((state) => settleState(state, new Date(), config.sleepAfterMinutes, config.settle).state);
-  if (config.bridge.enabled) await bridgeQueue.init();
+  if (config.bridge.enabled) {
+    await bridgeQueue.init();
+    if (config.bridge.selfSignalsEnabled) {
+      const startupState = await store.read();
+      const legacyAwarenessSignal = pendingAwarenessSignal(startupState.pendingAwareness, new Date());
+      if (legacyAwarenessSignal) {
+        await enqueueSelfSignal(legacyAwarenessSignal, new Date()).catch((error) => {
+          log('startup_pending_awareness_queue_failed', { message: error.message });
+        });
+      }
+    }
+  }
   await fromMeStore.list();
   await syncEvents.replayPending().catch((error) => log('xinchao_sync_replay_failed', {
     error_name: error?.name || 'Error',
