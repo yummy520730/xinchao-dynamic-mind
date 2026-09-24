@@ -334,6 +334,7 @@ const SESSION_NEUTRAL = Object.freeze({
   attention: 0.5,
   confidence: 0.5,
 });
+const SESSION_DECAY_GRACE_MS = 15 * 60_000;
 
 function decayedSessionOverlay(overlay, now = new Date()) {
   if (!overlay) return null;
@@ -349,7 +350,9 @@ function decayedSessionOverlay(overlay, now = new Date()) {
   if (!Number.isFinite(startAt) || !Number.isFinite(expiresAt) || expiresAt <= startAt) {
     return structuredClone(overlay);
   }
-  const progress = clamp((nowMs - startAt) / (expiresAt - startAt), 0, 1);
+  const decayStart = Math.min(expiresAt, startAt + SESSION_DECAY_GRACE_MS);
+  if (nowMs <= decayStart) return structuredClone(overlay);
+  const progress = clamp((nowMs - decayStart) / Math.max(1, expiresAt - decayStart), 0, 1);
   const projected = structuredClone(overlay);
   for (const key of SESSION_FIELDS) {
     const neutral = SESSION_NEUTRAL[key];
