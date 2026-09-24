@@ -63,7 +63,7 @@ const fromMeStore = new FromMeStore(config.fromMe.statePath, config.fromMe);
 const bridgeStreams = new Map();
 await oauth.init();
 let cyclePromise = null;
-const SYSTEM_VERSION = '2.5.15-lmc.1';
+const SYSTEM_VERSION = '2.6.0-lmc.1';
 
 function log(event, fields = {}) {
   console.log(JSON.stringify({ at: new Date().toISOString(), event, ...fields }));
