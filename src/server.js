@@ -34,6 +34,7 @@ import {
 } from './self-signal.js';
 import { FromMeStore } from './from-me-store.js';
 import { XinchaoSyncEvents } from './sync-events.js';
+import { recordXiaowoHugAwareness } from './xiaowo-hug-awareness.js';
 
 const config = validateConfig(loadConfig());
 if (!config.serviceToken) throw new Error('SERVICE_TOKEN is required');
@@ -895,6 +896,9 @@ async function recordConversationEvent(event, source = 'api', now = new Date()) 
       arrivalGapMinutes: config.anticipation.arrivalGapMinutes,
       presenceOnly: source === 'heartbeat',
     });
+    if (source === 'dashboard' && !applied.duplicate) {
+      recordXiaowoHugAwareness(applied.state, event, now);
+    }
     Object.assign(auditDetails, {
       changed: applied.changed,
       duplicate: applied.duplicate,
