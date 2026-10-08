@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { DIMENSIONS, DRIVE_KEYS, MEMORY_AFFINITY, SATURATE_CEIL } from './dimensions.js';
 import { awarenessId, ensureSelfSignalState } from './self-signal.js';
+import { hugAwarenessResidue } from './xiaowo-hug-awareness.js';
 import { newThoughtPool, obsessionBonus } from './thought-pool.js';
 
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
@@ -671,7 +672,7 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
   state.thoughtPool ??= newThoughtPool();
   const session = applySessionOverlay(state, event, now);
 
-  if (wasSleeping && !state.pendingAwareness?.xiaowoHug) {
+  if (wasSleeping) {
     const latest = state.recentDreams.at(-1);
     const belongsToThisSleep = latest && input.sleepStartedAt && Date.parse(latest.createdAt) >= Date.parse(input.sleepStartedAt);
     const createdAt = iso(now);
@@ -698,6 +699,14 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
       residue: belongsToThisSleep ? latest.residue : null,
       note: '外部记忆 MCP 只是记忆材料来源；调用记忆服务本身不代表醒来。',
     };
+    if (previousPending?.xiaowoHug) {
+      // Waking still produces this sleep's dream awareness. Carry the pending
+      // hug batch into that new version rather than skipping the wake block.
+      const batch = { ...previousPending.xiaowoHug };
+      batch.baseResidue = [...new Set([batch.baseResidue, state.pendingAwareness.residue].filter(Boolean))].join(' ');
+      state.pendingAwareness.xiaowoHug = batch;
+      state.pendingAwareness.residue = hugAwarenessResidue(batch);
+    }
   }
 
   const interaction = type && !eventId
