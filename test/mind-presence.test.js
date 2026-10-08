@@ -697,4 +697,110 @@ test('mind_presence returns pending awareness without consuming it until explici
   assert.equal(stored.awarenessHistory.length, 1);
   assert.equal(JSON.stringify(stored).includes('用户原文'), false);
 });
+test('xiaowo hugs appear in presence, coalesce, replay until ack, and resist stale ack', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'xinchao-awareness-ack-'));
+  const port = await freePort();
+  const token = 'mcp-awareness-ack-token-0123456789abcd';
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const statePath = join(directory, 'state.json');
+  const seededAt = new Date();
+  const seeded = newState(seededAt);
+  seeded.consciousness = 'awake';
+  seeded.lastConversationAt = seededAt.toISOString();
+  seeded.lastSettledAt = seededAt.toISOString();
+  seeded.awarenessHistory = [];
+  await writeFile(statePath, `${JSON.stringify(seeded)}\n`);
+  const output = { value: '' };
+  const child = spawn(process.execPath, [serverPath], {
+    cwd: projectDir,
+    env: {
+      ...process.env,
+      PORT: String(port),
+      SERVICE_TOKEN: token,
+      STATE_PATH: statePath,
+      TRANSITION_JOURNAL_PATH: join(directory, 'transitions.jsonl'),
+      OAUTH_STATE_PATH: join(directory, 'oauth.json'),
+      SETTLE_INTERVAL_MINUTES: '1440',
+      SHADOW_MODE: 'true',
+      MODEL_ENABLED: 'false',
+      BARK_ENABLED: 'false',
+      DAYTIME_EMERGENCE_ENABLED: 'false',
+      CONTEXT_OMBRE_ENABLED: 'false',
+      MCP_ENABLED: 'true',
+      OAUTH_ENABLED: 'false',
+      DASHBOARD_ENABLED: 'false',
+      BRIDGE_ENABLED: 'false',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stdout.on('data', (chunk) => { output.value += chunk; });
+  child.stderr.on('data', (chunk) => { output.value += chunk; });
+  t.after(async () => {
+    if (child.exitCode == null) {
+      child.kill('SIGTERM');
+      await once(child, 'exit');
+    }
+    await rm(directory, { recursive: true, force: true });
+  });
+  await waitForHealth(baseUrl, child, output);
+
+  const callTool = (name, args) => fetch(`${baseUrl}/mcp`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${token}`,
+      'content-type': 'application/json',
+      accept: 'application/json, text/event-stream',
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name, arguments: args },
+    }),
+  });
+
+  const hug = async (id, context = {}) => {
+    const response = await fetch(`${baseUrl}/v1/dashboard/interactions`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ event_id: id, interaction_type: 'affection', ...context }),
+    });
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  const presence = async (id) => {
+    const response = await callTool('mind_presence', { session_id: 'vps-window', event_id: id });
+    const body = await response.json();
+    assert.equal(body.result.isError, false);
+    return body.result.structuredContent.pending_awareness;
+  };
+  await hug('other-affection-1');
+  assert.equal(await presence('hug-presence-0'), null);
+  await hug('xiaowo-hug-first', { context_type: 'petal', context_id: 'crave' });
+  const first = await presence('hug-presence-1');
+  assert.match(first.residue, /芥子从小窝送来一个拥抱/);
+  assert.match(first.residue, /crave/);
+  assert.deepEqual(await presence('hug-presence-retry'), first);
+  await hug('xiaowo-hug-first', { context_type: 'petal', context_id: 'crave' });
+  assert.deepEqual(await presence('hug-presence-duplicate'), first);
+  await Promise.all([
+    hug('xiaowo-hug-second', { context_type: 'petal', context_id: 'possess' }),
+    hug('xiaowo-hug-third'),
+  ]);
+  const merged = await presence('hug-presence-2');
+  assert.notEqual(merged.id, first.id);
+  assert.match(merged.residue, /3 个拥抱/);
+  assert.match(merged.residue, /crave/);
+  assert.match(merged.residue, /possess/);
+  assert.equal((merged.residue.match(/芥子从小窝/g) || []).length, 1);
+  const stale = await callTool('mind_awareness_ack', { awareness_id: first.id, event_id: 'hug-presence-1' });
+  assert.equal((await stale.json()).result.structuredContent.acknowledged, false);
+  assert.deepEqual(await presence('hug-presence-3'), merged);
+  const ack = await callTool('mind_awareness_ack', { awareness_id: merged.id, event_id: 'hug-presence-3' });
+  assert.equal((await ack.json()).result.structuredContent.acknowledged, true);
+  assert.equal(await presence('hug-presence-after-ack'), null);
+  await hug('xiaowo-hug-fourth');
+  assert.match((await presence('hug-presence-new-batch')).residue, /一个拥抱/);
+});
+
 });

@@ -119,6 +119,9 @@ export function evaluateSelfSignal(beforeInput, afterInput, meta = {}, now = new
   const pending = after.pendingAwareness;
   const previousPendingId = String(before.pendingAwareness?.id ?? '');
   if (pending?.id && String(pending.id) !== previousPendingId) {
+    // Dashboard interactions already have their own bridge delivery. Hug
+    // versions are for presence/ack and must not add another wake per click.
+    if (pending.xiaowoHug) return { state: after, signal: null };
     return { state: after, signal: pendingAwarenessSignal(pending, now) };
   }
 

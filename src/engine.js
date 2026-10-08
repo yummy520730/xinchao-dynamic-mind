@@ -671,7 +671,7 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
   state.thoughtPool ??= newThoughtPool();
   const session = applySessionOverlay(state, event, now);
 
-  if (wasSleeping) {
+  if (wasSleeping && !state.pendingAwareness?.xiaowoHug) {
     const latest = state.recentDreams.at(-1);
     const belongsToThisSleep = latest && input.sleepStartedAt && Date.parse(latest.createdAt) >= Date.parse(input.sleepStartedAt);
     const createdAt = iso(now);
