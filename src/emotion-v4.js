@@ -10,14 +10,14 @@ const KEEP_MARKS_MS = 24 * HOUR;
 const MERGE_MARKS_MS = 2 * HOUR;
 
 const EVENTS = Object.freeze({
-  companionship:  { dv:  0.03, da:  0.01, word: null,    priority: 0 },
+  companionship:  { dv:  0.03, da:  0.01, word: '安稳',  priority: 0 },
   affection:      { dv:  0.12, da:  0.08, word: '温暖',  priority: 1 },
   intimacy:       { dv:  0.15, da:  0.18, word: '亲近',  priority: 2 },
   sharing:        { dv:  0.07, da:  0.05, word: '雀跃',  priority: 1 },
   discovery:      { dv:  0.05, da:  0.10, word: '好奇',  priority: 1 },
   task_progress:  { dv:  0.05, da:  0.00, word: '踏实',  priority: 1 },
   reflection:     { dv:  0.00, da: -0.08, word: null,    priority: 0 },
-  conflict:       { dv: -0.18, da:  0.18, word: '生气',  priority: 2 },
+  conflict:       { dv: -0.18, da:  0.18, word: '不安',  priority: 2 },
   loss:           { dv: -0.16, da: -0.05, word: '失落',  priority: 2 },
   reconciliation: { dv:  0.14, da: -0.06, word: '释然',  priority: 3 },
   reassurance:    { dv:  0.09, da: -0.05, word: '安心',  priority: 3 },
@@ -113,7 +113,9 @@ export function recordEmotionV4(previous, interactionType, now = new Date()) {
     updatedAt: now.toISOString(),
     base: applyBaseInertia(old, valence, arousal, nowMs),
     cause,
-    marks: addMark(old?.marks, replacesCause ? effect.word : null, kind, nowMs),
+    // Marks record every real emotional event, even when its lower-priority
+    // word does not displace the currently visible cause.
+    marks: addMark(old?.marks, effect.word, kind, nowMs),
     journal,
   };
 }
