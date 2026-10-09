@@ -35,6 +35,8 @@ import {
 import { FromMeStore } from './from-me-store.js';
 import { XinchaoSyncEvents } from './sync-events.js';
 import { recordXiaowoHugAwareness } from './xiaowo-hug-awareness.js';
+import { createOwnerShadowIngress } from './owner-shadow-ingress.js';
+import { redactRelationshipAudit, pruneRelationshipAudit } from './relationship-shadow.js';
 
 const config = validateConfig(loadConfig());
 if (!config.serviceToken) throw new Error('SERVICE_TOKEN is required');
@@ -47,6 +49,8 @@ if (config.serviceToken.length < 32) {
 }
 
 const store = new StateStore(config.statePath, () => newState());
+const ownerShadowIngress = createOwnerShadowIngress({ store, options: config.relationshipShadow,
+  ...config.ownerShadowIngress, serviceToken: config.serviceToken });
 const model = new ModelClient(config.model);
 const ombre = new OmbreClient(config.ombre);
 const notificationProvider = config.ntfy.enabled ? 'ntfy' : config.bark.enabled ? 'bark' : 'none';
@@ -1286,6 +1290,16 @@ const server = createServer(async (request, response) => {
         'MCP-Protocol-Version': negotiatedProtocolVersion(request, payload, result),
       });
     }
+    if (['/v1/owner-shadow/events', '/v1/owner-shadow/closeness'].includes(url.pathname)) {
+      if (request.method !== 'POST') return send(response, 405, { reason: 'method_not_allowed' });
+      // Dedicated channel, before generic service auth; no Dashboard/OAuth/MCP credential works here.
+      const supplied = request.headers.authorization?.replace(/^Bearer\s+/i, '') ?? '';
+      let envelope;
+      try { envelope = await body(request); }
+      catch { return send(response, 400, { reason: 'invalid_request' }); }
+      const result = await ownerShadowIngress(url.pathname.endsWith('/closeness') ? 'closeness' : 'event', envelope, supplied);
+      return send(response, result.status, result.body);
+    }
     if (!authorized(request)) return send(response, 401, { error: 'unauthorized' });
 
     if (request.method === 'POST' && url.pathname === '/v1/dashboard/interactions') {
@@ -1331,7 +1345,7 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === 'GET' && url.pathname === '/v1/state') {
-      return send(response, 200, await store.read());
+      return send(response, 200, redactRelationshipAudit(await store.read()));
     }
     if (request.method === 'GET' && url.pathname === '/v1/libido-snapshot') {
       const state = await store.read();
@@ -1400,6 +1414,7 @@ const server = createServer(async (request, response) => {
 
 server.listen(config.port, '0.0.0.0', async () => {
   await store.update((state) => settleState(state, new Date(), config.sleepAfterMinutes, config.settle).state);
+  if (config.ownerShadowIngress.enabled) await store.update((state) => pruneRelationshipAudit(state));
   if (config.bridge.enabled) {
     await bridgeQueue.init();
     if (config.bridge.selfSignalsEnabled) {
@@ -1427,6 +1442,14 @@ server.listen(config.port, '0.0.0.0', async () => {
 
 const timer = setInterval(() => runCycle().catch((error) => log('cycle_failed', { message: error.message })), config.settleIntervalMinutes * 60_000);
 timer.unref();
+
+// Private audit expires logically at 48h; physical cleanup within one minute
+// while this opt-in ingress runs, and on its next startup after downtime.
+if (config.ownerShadowIngress.enabled) {
+  const auditTimer = setInterval(() => store.update((state) => pruneRelationshipAudit(state))
+    .catch(() => log('owner_shadow_audit_cleanup_failed')), 60_000);
+  auditTimer.unref();
+}
 
 const bridgeTimer = setInterval(() => publishReadyBridgeDeliveries().catch((error) => log('bridge_publish_failed', { message: error.message })), config.bridge.pollSeconds * 1000);
 bridgeTimer.unref();
