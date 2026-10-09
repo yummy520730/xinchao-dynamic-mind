@@ -100,6 +100,11 @@ export function loadConfig() {
       token: process.env.SHADOW_OWNER_INGRESS_TOKEN ?? '',
       evidenceKey: process.env.SHADOW_OWNER_EVIDENCE_KEY ?? '',
     },
+    affectV4: {
+      coreAxesEnabled: bool('CORE_AXES_V4_ENABLED', false),
+      moodEnabled: bool('MOOD_V4_ENABLED', false),
+      mixedFeelingsEnabled: bool('MIXED_FEELINGS_V4_ENABLED', false),
+    },
     relationshipShadow: {
       favoredEnabled: bool('FAVORED_SHADOW_ENABLED', false),
       empathyEnabled: bool('EMPATHY_SHADOW_ENABLED', false),
