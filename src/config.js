@@ -95,6 +95,11 @@ export function loadConfig() {
       includePrivateText: bool('DASHBOARD_INCLUDE_PRIVATE_TEXT', false),
       dreamLimit: number('DASHBOARD_DREAM_LIMIT', 12, 1, 30),
     },
+    ownerShadowIngress: {
+      enabled: bool('SHADOW_OWNER_INGRESS_ENABLED', false),
+      token: process.env.SHADOW_OWNER_INGRESS_TOKEN ?? '',
+      evidenceKey: process.env.SHADOW_OWNER_EVIDENCE_KEY ?? '',
+    },
     relationshipShadow: {
       favoredEnabled: bool('FAVORED_SHADOW_ENABLED', false),
       empathyEnabled: bool('EMPATHY_SHADOW_ENABLED', false),
@@ -190,6 +195,15 @@ export function loadConfig() {
 }
 
 export function validateConfig(config) {
+  if (config.ownerShadowIngress?.enabled) {
+    const { token, evidenceKey } = config.ownerShadowIngress;
+    const reserved = [config.serviceToken, config.dashboard?.accessToken, config.bridge?.machineToken,
+      config.syncEvents?.token, config.mcp?.pathToken].filter(Boolean);
+    if (typeof token !== 'string' || token.length < 32 || !/^[a-f0-9]{64}$/.test(evidenceKey) ||
+        reserved.includes(token) || reserved.includes(evidenceKey) || token === evidenceKey) {
+      throw Error('Owner Shadow ingress requires independent server-only credentials');
+    }
+  }
   if (config.syncEvents?.enabled) {
     if (!config.syncEvents.url) throw new Error('SYNC_ENGINE_URL is required when source events are enabled');
     if (config.syncEvents.token.length < 32) {
