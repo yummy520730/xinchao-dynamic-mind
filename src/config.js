@@ -96,6 +96,7 @@ export function loadConfig() {
       dreamLimit: number('DASHBOARD_DREAM_LIMIT', 12, 1, 30),
     },
     interaction: {
+      emotionV4Enabled: bool('EMOTION_V4_ENABLED', false),
       maxEffectsPerDay: number('INTERACTION_MAX_EFFECTS_PER_DAY', 24, 1, 96),
       timeZone: process.env.INTERACTION_TIME_ZONE ?? process.env.SETTLE_TIME_ZONE ?? 'Asia/Shanghai',
     },
