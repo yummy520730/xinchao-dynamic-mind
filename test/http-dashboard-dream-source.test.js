@@ -28,7 +28,9 @@ async function waitForHealth(baseUrl, child, output) {
     if (child.exitCode != null) throw new Error(`心潮测试服务提前退出：${output.value}`);
     try {
       const response = await fetch(`${baseUrl}/health`);
-      if (response.ok) return;
+      // HTTP binding precedes the asynchronous startup state settlement.
+      // Take the read-only baseline only after startup has finished writing.
+      if (response.ok && output.value.includes('"event":"service_started"')) return;
     } catch {
       // still binding
     }

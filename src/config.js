@@ -95,6 +95,12 @@ export function loadConfig() {
       includePrivateText: bool('DASHBOARD_INCLUDE_PRIVATE_TEXT', false),
       dreamLimit: number('DASHBOARD_DREAM_LIMIT', 12, 1, 30),
     },
+    relationshipShadow: {
+      favoredEnabled: bool('FAVORED_SHADOW_ENABLED', false),
+      empathyEnabled: bool('EMPATHY_SHADOW_ENABLED', false),
+      maxEffectsPerDay: number('INTERACTION_MAX_EFFECTS_PER_DAY', 24, 1, 96),
+      timeZone: process.env.INTERACTION_TIME_ZONE ?? process.env.SETTLE_TIME_ZONE ?? 'Asia/Shanghai',
+    },
     interaction: {
       emotionV4Enabled: bool('EMOTION_V4_ENABLED', false),
       maxEffectsPerDay: number('INTERACTION_MAX_EFFECTS_PER_DAY', 24, 1, 96),
