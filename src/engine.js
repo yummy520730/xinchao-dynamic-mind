@@ -3,6 +3,7 @@ import { DIMENSIONS, DRIVE_KEYS, MEMORY_AFFINITY, SATURATE_CEIL } from './dimens
 import { awarenessId, ensureSelfSignalState } from './self-signal.js';
 import { hugAwarenessResidue } from './xiaowo-hug-awareness.js';
 import { newThoughtPool, obsessionBonus } from './thought-pool.js';
+import { recordEmotionV4 } from './emotion-v4.js';
 
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
 const iso = (value) => new Date(value).toISOString();
@@ -717,6 +718,12 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
       affectedDrives: [],
     }
     : applyInteractionOutcome(state, type, now, options);
+
+  // V4 mood is an independent event-only layer. Never turn wall-clock,
+  // presence or client-provided numeric fields into emotion changes.
+  if (interaction.applied && options.emotionV4Enabled === true) {
+    state.emotionV4 = recordEmotionV4(state.emotionV4, type, now);
+  }
 
   // Learn only from real semantic arrivals. Presence heartbeats and internal
   // LMC recalls never become samples, and messages inside one long session do
