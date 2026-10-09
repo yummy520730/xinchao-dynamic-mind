@@ -100,6 +100,34 @@ test('reconciliation replaces visible conflict cause without erasing 24h marks',
   assert.deepEqual(reconciled.marks.map(({ word }) => word), ['不安', '释然']);
 });
 
+test('busy days do not evict a still-valid conflict mark before 24h', () => {
+  const conflict = recordEmotionV4(null, 'conflict', at(0));
+  // Simulate many distinct completed emotional events in the same 24h window.
+  const crowded = structuredClone(conflict);
+  crowded.marks.push(...Array.from({ length: 40 }, (_, i) => ({
+    at: at(1 + i).toISOString(), word: `case-${i}`, weight: 1, why: 'sharing',
+  })));
+  const reconciled = recordEmotionV4(crowded, 'reconciliation', at(60));
+  const projection = projectEmotionV4(reconciled, at(61));
+  assert.equal(projection.shown, '释然');
+  assert.equal(projection.marks[0].word, '不安');
+  assert.ok(projection.marks.some((mark) => mark.word === '释然'));
+  assert.equal(projection.marks.length, 42);
+});
+
+test('a full 192-mark window stays intact on read and on no-mark events', () => {
+  const initial = recordEmotionV4(null, 'conflict', at(0));
+  initial.marks.push(...Array.from({ length: 191 }, (_, i) => ({
+    at: at(1).toISOString(), word: `case-${i}`, weight: 1, why: 'sharing',
+  })));
+  const projected = projectEmotionV4(initial, at(2));
+  assert.equal(projected.marks.length, 192);
+  assert.equal(projected.marks[0].word, '不安');
+  const reflected = recordEmotionV4(initial, 'reflection', at(3));
+  assert.equal(reflected.marks.length, 192);
+  assert.equal(reflected.marks[0].word, '不安');
+});
+
 test('same emotion within two hours merges its marks', () => {
   const first = recordEmotionV4(null, 'affection', at(0));
   const second = recordEmotionV4(first, 'affection', at(20));
