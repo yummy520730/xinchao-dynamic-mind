@@ -1,6 +1,7 @@
 import { DIMENSIONS, DRIVE_KEYS } from './dimensions.js';
 import { computeAnticipation, computeLonging } from './engine.js';
 import { projectEmotionV4 } from './emotion-v4.js';
+import { projectRelationshipShadow } from './relationship-shadow.js';
 
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, Number(value) || 0));
 
@@ -143,6 +144,7 @@ export function buildDashboardSnapshot(state = {}, config = {}, now = new Date()
     ...(config.interaction?.emotionV4Enabled && state.emotionV4
       ? { emotion: projectEmotionV4(state.emotionV4, generatedAt) }
       : {}),
+    ...projectRelationshipShadow(state, config.relationshipShadow, generatedAt),
     rhythm: {
       learnedSamples: Number((Array.isArray(state.arrivalHistogram)
         ? state.arrivalHistogram.reduce((sum, value) => sum + (Number(value) || 0), 0)
