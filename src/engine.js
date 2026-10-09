@@ -1,3 +1,4 @@
+import { recordAffectV4 } from './affect-v4.js';
 import { createHash } from 'node:crypto';
 import { DIMENSIONS, DRIVE_KEYS, MEMORY_AFFINITY, SATURATE_CEIL } from './dimensions.js';
 import { awarenessId, ensureSelfSignalState } from './self-signal.js';
@@ -723,6 +724,7 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
   // presence or client-provided numeric fields into emotion changes.
   if (interaction.applied && options.emotionV4Enabled === true) {
     state.emotionV4 = recordEmotionV4(state.emotionV4, type, now);
+    recordAffectV4(state, now, options.affectV4);
   }
 
   // Learn only from real semantic arrivals. Presence heartbeats and internal

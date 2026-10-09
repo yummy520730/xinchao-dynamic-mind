@@ -1,3 +1,4 @@
+import { projectAffectV4 } from './affect-v4.js';
 import { DIMENSIONS, DRIVE_KEYS } from './dimensions.js';
 import { computeAnticipation, computeLonging } from './engine.js';
 import { projectEmotionV4 } from './emotion-v4.js';
@@ -145,6 +146,7 @@ export function buildDashboardSnapshot(state = {}, config = {}, now = new Date()
       ? { emotion: projectEmotionV4(state.emotionV4, generatedAt) }
       : {}),
     ...projectRelationshipShadow(state, config.relationshipShadow, generatedAt),
+    ...projectAffectV4(state, config.affectV4, generatedAt),
     rhythm: {
       learnedSamples: Number((Array.isArray(state.arrivalHistogram)
         ? state.arrivalHistogram.reduce((sum, value) => sum + (Number(value) || 0), 0)

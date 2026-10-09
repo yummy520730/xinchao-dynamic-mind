@@ -1,3 +1,4 @@
+import { redactAffectAudit, pruneAffectAudit } from './affect-v4.js';
 import { createServer } from 'node:http';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { loadConfig, validateConfig } from './config.js';
@@ -50,7 +51,7 @@ if (config.serviceToken.length < 32) {
 
 const store = new StateStore(config.statePath, () => newState());
 const ownerShadowIngress = createOwnerShadowIngress({ store, options: config.relationshipShadow,
-  ...config.ownerShadowIngress, serviceToken: config.serviceToken });
+  ...config.ownerShadowIngress, affectOptions: { ...config.affectV4, timeZone: config.relationshipShadow.timeZone }, serviceToken: config.serviceToken });
 const model = new ModelClient(config.model);
 const ombre = new OmbreClient(config.ombre);
 const notificationProvider = config.ntfy.enabled ? 'ntfy' : config.bark.enabled ? 'bark' : 'none';
@@ -840,6 +841,8 @@ async function createContextEnvelope({
     alreadyDelivered: delivery.alreadyDelivered,
     force,
   });
+  // Inspection is a read, not a delivery. Preserve actual session/turn receipts.
+  if (mode === 'inspect') return envelope;
   if (envelope.delivered) {
     state = await updateState({
       type: 'context_delivery',
@@ -893,7 +896,7 @@ async function recordConversationEvent(event, source = 'api', now = new Date()) 
     applied = settleAndApplyConversationEvent(current, event, now, {
       sleepAfterMinutes: config.sleepAfterMinutes,
       settle: config.settle,
-      interaction: config.interaction,
+      interaction: { ...config.interaction, affectV4: config.affectV4 },
       recordArrival: config.anticipation.enabled
         && source !== 'heartbeat'
         && Boolean(event.interactionType ?? event.interaction_type),
@@ -1345,7 +1348,7 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === 'GET' && url.pathname === '/v1/state') {
-      return send(response, 200, redactRelationshipAudit(await store.read()));
+      return send(response, 200, redactAffectAudit(redactRelationshipAudit(await store.read())));
     }
     if (request.method === 'GET' && url.pathname === '/v1/libido-snapshot') {
       const state = await store.read();
@@ -1414,7 +1417,8 @@ const server = createServer(async (request, response) => {
 
 server.listen(config.port, '0.0.0.0', async () => {
   await store.update((state) => settleState(state, new Date(), config.sleepAfterMinutes, config.settle).state);
-  if (config.ownerShadowIngress.enabled) await store.update((state) => pruneRelationshipAudit(state));
+  if (config.ownerShadowIngress.enabled) await store.update((state) => pruneAffectAudit(pruneRelationshipAudit(state), config.affectV4));
+  else if (Object.values(config.affectV4).some(Boolean)) await store.update((state) => pruneAffectAudit(state, config.affectV4));
   if (config.bridge.enabled) {
     await bridgeQueue.init();
     if (config.bridge.selfSignalsEnabled) {
@@ -1445,8 +1449,9 @@ timer.unref();
 
 // Private audit expires logically at 48h; physical cleanup within one minute
 // while this opt-in ingress runs, and on its next startup after downtime.
-if (config.ownerShadowIngress.enabled) {
-  const auditTimer = setInterval(() => store.update((state) => pruneRelationshipAudit(state))
+if (config.ownerShadowIngress.enabled || Object.values(config.affectV4).some(Boolean)) {
+  const auditTimer = setInterval(() => store.update((state) => pruneAffectAudit(
+    config.ownerShadowIngress.enabled ? pruneRelationshipAudit(state) : state, config.affectV4))
     .catch(() => log('owner_shadow_audit_cleanup_failed')), 60_000);
   auditTimer.unref();
 }
