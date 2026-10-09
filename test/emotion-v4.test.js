@@ -44,12 +44,60 @@ test('base inertia requires a sustained candidate', () => {
 
 test('reconciliation can supersede conflict but a mild affection cannot', () => {
   const conflict = recordEmotionV4(null, 'conflict', at(0));
-  assert.equal(projectEmotionV4(conflict, at(0)).shown, '生气');
+  assert.equal(projectEmotionV4(conflict, at(0)).shown, '不安');
   const hug = recordEmotionV4(conflict, 'affection', at(2));
-  assert.equal(projectEmotionV4(hug, at(2)).shown, '生气');
+  assert.equal(projectEmotionV4(hug, at(2)).shown, '不安');
   const repaired = recordEmotionV4(conflict, 'reconciliation', at(2));
   assert.equal(projectEmotionV4(repaired, at(2)).shown, '释然');
   assert.equal(projectEmotionV4(repaired, at(19)).shown, repaired.base.label);
+});
+
+test('conflict changes only its label, not emotional coordinates', () => {
+  const conflict = recordEmotionV4(null, 'conflict', at(0));
+  assert.equal(conflict.valence, 0.37);
+  assert.equal(conflict.arousal, 0.48);
+  assert.equal(projectEmotionV4(conflict, at(0)).shown, '不安');
+  assert.equal(conflict.marks[0].word, '不安');
+  assert.equal(conflict.marks[0].why, 'conflict');
+});
+
+test('companionship has a low-priority steady feeling and leaves a trace', () => {
+  const companionship = recordEmotionV4(null, 'companionship', at(0));
+  assert.equal(companionship.valence, 0.58);
+  assert.equal(companionship.arousal, 0.31);
+  assert.equal(projectEmotionV4(companionship, at(0)).shown, '安稳');
+  assert.deepEqual(companionship.marks.map(({ word, why }) => [word, why]), [['安稳', 'companionship']]);
+});
+
+test('quiet companionship leaves a mark even while conflict remains visible', () => {
+  const conflict = recordEmotionV4(null, 'conflict', at(0));
+  const beside = recordEmotionV4(conflict, 'companionship', at(4));
+  assert.equal(projectEmotionV4(beside, at(4)).shown, '不安');
+  assert.deepEqual(beside.marks.map(({ word }) => word), ['不安', '安稳']);
+  const more = recordEmotionV4(beside, 'companionship', at(8));
+  assert.equal(projectEmotionV4(more, at(8)).shown, '不安');
+  assert.deepEqual(more.marks.map(({ word }) => word), ['不安', '安稳']);
+  assert.equal(more.marks.find(({ word }) => word === '安稳').n, 2);
+});
+
+test('reconciliation replaces visible conflict cause without erasing 24h marks', () => {
+  const conflict = recordEmotionV4(null, 'conflict', at(0));
+  const reconciled = recordEmotionV4(conflict, 'reconciliation', at(2));
+  const visible = projectEmotionV4(reconciled, at(2));
+  assert.equal(visible.shown, '释然');
+  assert.equal(visible.cause.why, 'reconciliation');
+  assert.deepEqual(visible.marks.map(({ word, why }) => [word, why]), [
+    ['不安', 'conflict'],
+    ['释然', 'reconciliation'],
+  ]);
+  assert.equal(reconciled.journal.length, 2);
+  // The earlier conflict survives through the retention window, even though
+  // only the latest cause is shown; it expires after its own 24h age.
+  const beforeExpiry = projectEmotionV4(reconciled, at(23 * 60 + 59));
+  assert.deepEqual(beforeExpiry.marks.map(({ word }) => word), ['不安', '释然']);
+  const afterExpiry = projectEmotionV4(reconciled, at(24 * 60 + 1));
+  assert.deepEqual(afterExpiry.marks.map(({ word }) => word), ['释然']);
+  assert.deepEqual(reconciled.marks.map(({ word }) => word), ['不安', '释然']);
 });
 
 test('same emotion within two hours merges its marks', () => {
