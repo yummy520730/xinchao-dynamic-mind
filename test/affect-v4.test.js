@@ -318,3 +318,19 @@ test('queued P2 admission rechecks evidence on the serialized write clock before
   const before=await store.read();const result=await service.ingest(event(),{now:start},start);
   assert.equal(result.reason,'evidence_invalid_or_expired');assert.equal(checks,2);assert.deepEqual(await store.read(),before);
 });
+
+
+test('enabling P2 cannot replay earlier P1 receipts, including aliases after P1 is disabled', async(t) => {
+  const { store,config }=await fixture(t,{favoredEnabled:true});
+  const old=createOwnerShadowIngress({...config,affectOptions:{}}),e={...event('already-settled'),event_type:'favored_hurt',reason:'broken_promise'};
+  await old('event',await signEvidence(e,'event',key,start),token,start);
+  const before=await store.read();assert.equal(before.coreAxesV4,undefined);
+  const on=createOwnerShadowIngress(config);
+  const replay=await on('event',await signEvidence(e,'event',key,at(1)),token,at(1));
+  assert.equal(replay.body.affect_settled,false);assert.equal(replay.body.affect_reason,'prior_settlement_no_backfill');
+  assert.equal((await store.read()).coreAxesV4,undefined);
+  const disabled=createOwnerShadowIngress({...config,options:{favoredEnabled:false,empathyEnabled:false}});
+  const alias={...e,event_id:hash('historical-alias')};
+  const response=await disabled('event',await signEvidence(alias,'event',key,at(2)),token,at(2));
+  assert.equal(response.body.affect_reason,'prior_settlement_no_backfill');assert.equal((await store.read()).coreAxesV4,undefined);
+});

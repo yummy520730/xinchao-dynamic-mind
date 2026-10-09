@@ -23,6 +23,7 @@ P0 `emotionV4.journal` 是最近 **48 次已结算语义互动后的坐标**，�
 - 慢轴直接读取验签后的事实枚举；不读取 Shadow intensity/candidate/delta。不把 P1 候选升级为 drives 或 `emotionV4`。独立 P2 flag 明确授权这种**报告驱动的模型估计**，状态 `owner_report_model` 不等同真实心理测量。
 - P1 flags OFF 时也可以独立 admission 到慢轴；响应仍如实 `shadow_settled=false, reason=disabled`，可选额外 `affect_settled/affect_reason` 指慢轴。未改动的 Worker 仍按原白名单转发 P1 回执，不转发这两个新诊断字段；P2结果从 Snapshot 读取，现有 Owner UI不会假称 Shadow 已结算。
 - 原 P1 enabled 时，拒绝身份冲突/不支持版本/关系冲突等，不提交计算草稿到慢轴；P2账本不兼容或时钟错误也显式拒绝本次事务。允许合法 `no_change` P1结果（如初始零强度安抚）产生独立慢轴变化。
+- 早于P2启用的P1 receipt（含6h内语义alias、即使后来P1关闭）重试拒绝补写慢轴，返回 `prior_settlement_no_backfill`，不做历史backfill。
 - 亲疏修订只走原 `reviseCloseness`；无慢轴 replay、历史补账、P0回放。
 - 抱抱前缀、presence、ACK、沉默、其他 AI 使用、聊天、玩笑/假设/角色扮演、普通 task_progress、LMC召回都不会生成慢轴输入。未接拥抱/intimacy、任务成功、挫败/自责：现有可靠 schema 不足，未增设假入口。
 
@@ -114,7 +115,7 @@ enabled层沿既有唯一StateStore每分钟维护，只删过期core receipts48
 
 ## 验证与可重现命令
 
-Node20.20.2 / Node22.23.3：各自完整 `npm test` **242 PASS，0 FAIL，0 SKIP**。原210项 + 新31单元/状态集成项 + 1真实HTTP测试。完整回归保留12维/P0/P1/P1.5、presence/ACK/Murmur/拥抱睡眠梦境等原测试，额外在P2开启时检查睡眠抱抱→正常对话唤醒两种觉察共存、慢轴不产生自我信号。
+Node20.20.2 / Node22.23.3：各自完整 `npm test` **243 PASS，0 FAIL，0 SKIP**。原210项 + 新32单元/状态集成项 + 1真实HTTP测试。完整回归保留12维/P0/P1/P1.5、presence/ACK/Murmur/拥抱睡眠梦境等原测试，额外在P2开启时检查睡眠抱抱→正常对话唤醒两种觉察共存、慢轴不产生自我信号。
 
 独立真实Worker链路：各版本 **1 PASS**，Miniflare4.20260730.0/workerd，原小窝Worker模块图 → 本地真实TLS代理 → 实际心潮子进程 → 磁盘StateStore → 通过Worker读取Snapshot。Owner错误401、内容篡改409、原文拒绝422、8并发只有1次有效作用、Shadow仍OFF均实测。签名/auth/fetch/reducer/回执均无mock。这里使用测试Owner凭据和表单fixture，不是人类真实确认或生产数据。npm全量内HTTP测试同样为真实socket+disk，包含实际停止/重启、flags关闭回滚、读取文件逐字不变。
 
