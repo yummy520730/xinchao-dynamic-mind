@@ -31,7 +31,7 @@ test('REAL unchanged Owner Worker → TLS → P2 runtime → Snapshot', {
     BARK_ENABLED:'false',NTFY_ENABLED:'false',SELF_SIGNAL_ENABLED:'false',BRIDGE_ENABLED:'false',DAYTIME_EMERGENCE_ENABLED:'false',SETTLE_INTERVAL_MINUTES:'1440'},stdio:['ignore','pipe','pipe']});
   let output='';child.stdout.on('data',(d)=>output+=d);child.stderr.on('data',(d)=>output+=d);
   t.after(async()=>{if(child.exitCode==null){const ended=once(child,'exit');child.kill('SIGTERM');await ended;}});
-  let ready=false;for(let i=0;i<200;i++){assert.equal(child.exitCode,null,output);try{if((await fetch(base+'/health')).ok){ready=true;break;}}catch{}await new Promise((r)=>setTimeout(r,30));}assert.ok(ready);
+  let ready=false;for(let i=0;i<200;i++){assert.equal(child.exitCode,null,output);try{if(output.includes('"event":"service_started"') && (await fetch(base+'/health')).ok){ready=true;break;}}catch{}await new Promise((r)=>setTimeout(r,30));}assert.ok(ready);
   execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=127.0.0.1','-addext','subjectAltName=IP:127.0.0.1',
     '-keyout',join(dir,'tls.key'),'-out',join(dir,'tls.crt')],{stdio:'ignore'});
   const cert=await readFile(join(dir,'tls.crt'),'utf8');

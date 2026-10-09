@@ -19,6 +19,7 @@ test('P2 real HTTP: signed admission, retries, privacy, read purity, P0 and rest
   const stop=async()=>{if(child&&child.exitCode==null){const ended=once(child,'exit');child.kill('SIGTERM');await ended;}};
   t.after(async()=>{await stop();await rm(dir,{recursive:true,force:true});});
   async function launch(enabled=true){
+    const outputStart=output.length;
     const probe=createServer();probe.listen(0,'127.0.0.1');await once(probe,'listening');const port=probe.address().port;
     await new Promise((resolve)=>probe.close(resolve));
     child=spawn(process.execPath,['src/server.js'],{env:{PATH:process.env.PATH,PORT:String(port),SERVICE_TOKEN:service,
@@ -30,7 +31,7 @@ test('P2 real HTTP: signed admission, retries, privacy, read purity, P0 and rest
       BRIDGE_ENABLED:'false',MCP_ENABLED:'false',OAUTH_ENABLED:'false',DAYTIME_EMERGENCE_ENABLED:'false',DREAM_NIGHT_MODE:'off',SETTLE_INTERVAL_MINUTES:'1440'},stdio:['ignore','pipe','pipe']});
     child.stdout.on('data',(d)=>output+=d);child.stderr.on('data',(d)=>output+=d);
     const url=`http://127.0.0.1:${port}`;const deadline=Date.now()+10000;
-    while(Date.now()<deadline){assert.equal(child.exitCode,null,output);try{if((await fetch(url+'/health')).ok)return url;}catch{}
+    while(Date.now()<deadline){assert.equal(child.exitCode,null,output);try{if(output.slice(outputStart).includes('"event":"service_started"') && (await fetch(url+'/health')).ok)return url;}catch{}
       await new Promise((r)=>setTimeout(r,30));}
     throw Error('test runtime did not become ready');
   }
