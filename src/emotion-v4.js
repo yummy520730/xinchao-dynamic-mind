@@ -8,6 +8,10 @@ const BASELINE = Object.freeze({ valence: 0.55, arousal: 0.30 });
 const INERTIA = Object.freeze({ baseHoldMinutes: 10, causeHoldMinutes: 15, baseMargin: 0.10 });
 const KEEP_MARKS_MS = 24 * HOUR;
 const MERGE_MARKS_MS = 2 * HOUR;
+// Max semantic outcomes per local day is 96; a rolling 24h window can touch
+// two local dates. Retain up to 192 marks so valid 24h history is not evicted
+// by a smaller arbitrary count limit before the time-based expiry.
+const MAX_MARKS = 192;
 
 const EVENTS = Object.freeze({
   companionship:  { dv:  0.03, da:  0.01, word: '安稳',  priority: 0 },
@@ -72,7 +76,7 @@ function addMark(marks, word, type, nowMs) {
   const entries = (Array.isArray(marks) ? marks : []).filter((mark) => {
     const at = validTime(mark.lastAt ?? mark.at, 0);
     return at > nowMs - KEEP_MARKS_MS && at <= nowMs;
-  }).slice(-35).map((m) => ({ ...m }));
+  }).slice(-(MAX_MARKS - 1)).map((m) => ({ ...m }));
   if (!word) return entries;
   const last = [...entries].reverse().find((mark) => mark.word === word &&
     nowMs - validTime(mark.lastAt ?? mark.at, 0) <= MERGE_MARKS_MS);
@@ -83,7 +87,7 @@ function addMark(marks, word, type, nowMs) {
     return entries;
   }
   entries.push({ at, word, weight: 1, why: type });
-  return entries.slice(-36);
+  return entries.slice(-MAX_MARKS);
 }
 
 /**
