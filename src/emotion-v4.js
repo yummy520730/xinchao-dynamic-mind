@@ -76,7 +76,7 @@ function addMark(marks, word, type, nowMs) {
   const entries = (Array.isArray(marks) ? marks : []).filter((mark) => {
     const at = validTime(mark.lastAt ?? mark.at, 0);
     return at > nowMs - KEEP_MARKS_MS && at <= nowMs;
-  }).slice(-(MAX_MARKS - 1)).map((m) => ({ ...m }));
+  }).slice(-MAX_MARKS).map((m) => ({ ...m }));
   if (!word) return entries;
   const last = [...entries].reverse().find((mark) => mark.word === word &&
     nowMs - validTime(mark.lastAt ?? mark.at, 0) <= MERGE_MARKS_MS);
